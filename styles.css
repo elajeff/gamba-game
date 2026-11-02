@@ -121,7 +121,7 @@ main { padding: 26px 0 28px; }
   padding: 24px 28px 18px;
   background: radial-gradient(ellipse at 50% 32%, rgba(126, 76, 226, 0.18), transparent 48%), linear-gradient(155deg, rgba(31, 25, 59, 0.99), rgba(19, 18, 41, 0.99) 58%, rgba(17, 16, 35, 1));
 }
-/* Cosmic atmosphere is confined to the top of the game panel; the UI remains untouched. */
+/* Space background, only at the top of the game panel. */
 .game-starfield {
   position: absolute;
   z-index: 0;
