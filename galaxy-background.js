@@ -6,7 +6,7 @@ export function initGalaxyCanvas() {
   if (!context) return;
 
   const random = (() => {
-    // A stable seed keeps the particle composition art-directed between visits.
+    // Fixed seed, so the field looks the same on every visit.
     let seed = 0x67a11a;
     return () => {
       seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
@@ -18,8 +18,7 @@ export function initGalaxyCanvas() {
     return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * random());
   };
 
-  // Fine, low-contrast dust carries the color directly; no blur, bloom, or hard nuclei.
-  // Muted colors are deliberately restrained so the starfield and multiplier stay readable.
+  // Dull colors, so the field doesn't compete with the multiplier.
   const palette = [
     [112, 91, 174],  // shadow violet
     [139, 91, 166],  // muted plum
@@ -38,8 +37,7 @@ export function initGalaxyCanvas() {
   let dpr = 1;
 
   function chooseColor(x, y) {
-    // A low-frequency color drift mixes warm and cool tones across the full formation.
-    // No single coordinate becomes a bright red island or a planet-like center.
+    // The wave mixes warm and cool colors across the field so no spot turns bright red.
     const wave = 0.5 + 0.5 * Math.sin((x / width) * Math.PI * 2.1 + Math.sin((y / height) * Math.PI * 1.6) * 0.8);
     const roll = random();
     if (roll < 0.10 + wave * 0.07) return 3;
@@ -51,8 +49,7 @@ export function initGalaxyCanvas() {
   }
 
   function sampleCloudX() {
-    // Two wide, overlapping density regions make elongated clusters; their overlap keeps them connected.
-    // There are no focal centers, rings, or bright spherical bodies.
+    // Two wide, overlapping clusters, so the field has no single bright center.
     if (random() < 0.58) {
       const side = random() < 0.5 ? -1 : 1;
       let candidate;
@@ -101,7 +98,7 @@ export function initGalaxyCanvas() {
         y = spine + normal() * height * (0.067 + irregularity * 0.6);
         kind = "lower-dust";
       } else {
-        // Sparse background grains keep the dark space from feeling like a solid flat panel.
+        // Sparse grains over the rest of the background.
         x = random() * width;
         y = random() * height;
         kind = "background-dust";
@@ -118,7 +115,7 @@ export function initGalaxyCanvas() {
       else alpha = 0.025 + random() * 0.07;
 
       const phase = random() * Math.PI * 2;
-      // Bake the tiny initial offset into the point; no phase or kind metadata is needed later.
+      // Apply the small starting offset now so the point doesn't need to keep phase or kind.
       particles.push({
         x: x + Math.sin(phase) * 0.42,
         y: y + Math.cos(phase) * 0.48,
@@ -166,8 +163,7 @@ export function initGalaxyCanvas() {
     drawStaticField();
   }
 
-  // Expensive particle placement and painting now happen only at startup or resize.
-  // CSS handles the very slight motion; no per-frame particle loop competes with input events.
+  // Particles are placed and painted only at startup and on resize. CSS handles the slight motion.
   const resizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(resize) : null;
   if (resizeObserver) resizeObserver.observe(canvas.parentElement);
   else window.addEventListener("resize", resize, { passive: true });
