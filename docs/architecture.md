@@ -44,7 +44,7 @@ Unexpected failures return a generic `internal_error` response with a request ID
 
 Historical rounds and seed commitments/reveals are not automatically pruned: they are part of the fairness audit trail. Old early-release intents are removed after their short hand-off window. The `round-start` response cache can be pruned after 30 days because the same response is also stored on the persistent round record and the unique round idempotency key remains available for replay lookup. Other mutation idempotency responses are retained to preserve exact retry responses for operations such as cash-out, loans and reset; pruning those without a separate durable replay strategy could change retry behavior.
 
-A session is not automatically deleted by this change. Session expiry and whole-session deletion would affect saved user history and should be designed explicitly rather than hidden inside routine cleanup.
+Sessions are not deleted automatically either. Expiring or deleting a whole session would remove saved user history, so it needs its own design instead of being part of routine cleanup.
 
 ## Verification limits
 
