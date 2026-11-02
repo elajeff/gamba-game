@@ -4,7 +4,9 @@
 
 A browser crash game. Hold to start a round, watch the multiplier climb, and release before it crashes. You play with in-game gold (888 to start, plus optional loans); there is no real money involved.
 
-The frontend is plain JavaScript on GitHub Pages. The backend is a Cloudflare Worker with one SQLite-backed Durable Object per player session, and the server decides every outcome and payout. The browser only handles input and display.
+The frontend is plain JavaScript on GitHub Pages. The backend is a Cloudflare Worker with one SQLite-backed Durable Object per player session, and the server decides every outcome and payout. The browser only handles input and display. Every crash point can be checked afterwards against a seed commitment published before the round, and the backend has regression tests for duplicate requests, races between cash-out and settlement, and disconnects.
+
+![A round in progress at x2.26, with personal bests on the left and recent rounds and bank loans on the right](docs/images/round.png)
 
 ## How it works
 
