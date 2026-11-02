@@ -83,3 +83,7 @@ The Worker is deployed with Wrangler and the frontend is served by GitHub Pages 
 - The multiplier on screen is an estimate from the server's start time; network delay can make the crash notice arrive late.
 - Sessions are anonymous and live in one browser profile. They don't sync between devices.
 - There is no rate limiting, so heavy automated traffic could use up the Cloudflare free-tier quota. See [SECURITY.md](SECURITY.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
