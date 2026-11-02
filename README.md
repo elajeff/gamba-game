@@ -1,23 +1,24 @@
 # gamba
 
-**[Play the game](https://elajeff.github.io/gamba-game/)** 
+**[Play the game](https://elajeff.github.io/gamba-game/)**
 
-A browser-based crash game built with vanilla JavaScript and Cloudflare Workers. Each player session is backed by a SQLite-backed Durable Object that owns the balance, loans, round state, and settlement. The browser handles input and presentation; the server decides outcomes and payouts.
+A browser crash game. Hold to start a round, watch the multiplier climb, and release before it crashes. You play with in-game gold (888 to start, plus optional loans); there is no real money involved.
 
-## Technical highlights
+The frontend is plain JavaScript on GitHub Pages. The backend is a Cloudflare Worker with one SQLite-backed Durable Object per player session, and the server decides every outcome and payout. The browser only handles input and display.
 
-- **Transactional gameplay:** Per-session Durable Objects serialize mutations. A durable start reservation plus edge-received timestamps prevent overlapping start requests from opening a second round—even if the first crashes instantly at `1.00×`. SQLite transactions and idempotency keys protect wallet mutations; Durable Object alarms settle rounds if the browser disconnects.
-- **Verifiable outcomes:** Each server seed is committed by SHA-256 before use. HMAC-SHA-256 and the first 52 digest bits determine the crash point; unrevealed seeds are encrypted with AES-256-GCM and revealed at rotation. Verification can reproduce recorded outcomes, but cannot prove that no round was omitted or that deployed code never changed.
-- **Low-latency round handling:** An authenticated WebSocket pushes settlement events. An idempotent release-intent endpoint handles a release that arrives while round startup is still in flight, avoiding an unnecessary sequential request. Adaptive status polling provides recovery when push is unavailable; settlement remains server-controlled.
-- **Security controls:** Signed session tokens, exact-origin CORS, bounded request bodies, and Cloudflare-managed secrets protect the API boundary. Non-extractable `CryptoKey` objects are cached for warm requests without caching a plaintext server seed as a long-lived field.
-- **Regression tests and CI:** Node tests cover deterministic outcomes, malformed requests, authentication, duplicate operations, concurrent starts, loan rules, alarms, event-delivery recovery, and browser-module contracts. Backend and frontend tests live in separate directories and run together through `npm.cmd test`. GitHub Actions runs the same suite on pushes and pull requests.
-- **Reviewable source layout:** The browser API client, DOM renderer, fairness verifier, and static galaxy renderer are separate modules. Backend request routing, request parsing, authentication, shared crypto helpers, fairness math, and request error logging have clear module boundaries; session lifecycle and database transactions remain together where they must stay atomic.
-- **Independent fairness check:** `tools/verify-fairness.js` independently recomputes supplied seed commitments and round outcomes using Node's built-in crypto module. See [the verifier guide](docs/fairness-verification.md) and [architecture notes](docs/architecture.md).
-- **Efficient client rendering:** The cosmic dust field is rasterized once and moved with CSS rather than recalculating every particle per frame. The client pauses work when the page is hidden, requests only the ten history entries it displays, and uses pointer capture with touch-selection suppression plus keyboard controls for the hold interaction.
+## How it works
 
-## How the crash multiplier is calculated
+- **The server owns the game state.** Each session's Durable Object holds the balance, loans and rounds. Wallet changes run in SQLite transactions, every mutating request carries an idempotency key so a retry can't charge twice, and alarms settle a round if the browser disconnects.
+- **Start and release can arrive close together.** A start reservation stops a second round opening while the first is still starting, and a release that arrives during startup is recorded and applied once the round exists.
+- **Cash-outs are capped by the server.** The browser sends the multiplier it showed when you released. The server checks its own clock against the committed crash point first, then pays the lower of the two values. A release that arrives after the crash still loses.
+- **Settlement is pushed over a WebSocket**, with status polling as a fallback when the socket is down.
+- **Outcomes can be checked afterwards.** Each server seed is published as a SHA-256 commitment before use and revealed when it rotates (see below).
 
-For each round, the server computes an HMAC-SHA-256 digest from the server seed, client seed, and round nonce. The first 52 digest bits become an integer `r`, where `D = 2^52`:
+[docs/architecture.md](docs/architecture.md) covers the source layout and the rules the code has to keep.
+
+## How the crash point is calculated
+
+For each round the server computes an HMAC-SHA-256 digest from the server seed, client seed and round nonce, and takes the first 52 bits:
 
 ```text
 digest = HMAC-SHA-256(serverSeed, clientSeed:nonce)
@@ -27,47 +28,56 @@ crashCents = max(100, floor((100 - e) * D / (D - r)))
 crashMultiplier = crashCents / 100
 ```
 
-`e` is the house edge in percentage points (`1` means a 1% edge). The result is rounded down to cents and never falls below `1.00×`. The implementation also bounds the extreme tail well above the game's `10×` cash-out cap. The same seed, nonce, and edge reproduce the same result.
+`e` is the house edge in percentage points (`1` means 1%). The result is rounded down to cents and is never below `1.00×`. Cash-outs are capped at `10×`. The same seed, nonce and edge always give the same result.
 
-### Timing and verification limits
+Unrevealed seeds are stored encrypted with AES-256-GCM. The crash point is never sent while a round is running.
 
-The browser estimates the multiplier from a server timestamp using `performance.now()`, so changes to the local system clock do not drive the display. On release, the client sends the cent-rounded multiplier it actually displayed as a **maximum requested payout multiplier**. The server still checks the committed crash point against its own clock first, and caps a successful cash-out at the lower of that request and the server's live multiplier; a request that arrives after the crash still loses. If a release reaches the server at the x10 boundary before the automatic alarm settles the round, the same visible-value cap applies. If the automatic x10 settlement commits first, its result stands. This avoids upward jumps in successful cash-out results without trusting the client to declare that a round survived. Network delivery and platform scheduling can still delay crash notifications, and the display remains an estimate. The crash point is not sent while a round is running.
+## Checking past rounds
 
-The server publishes a SHA-256 commitment before using a seed and reveals the seed at rotation. This lets anyone recompute recorded results against the commitment and formula, but it does not prove the completeness of the public history or the immutability of deployed code.
-
-## Independent fairness verification
-
-Prepare a JSON export containing the full `seeds` and `rounds` arrays from the public `/api/fairness` responses, then run this from the repository root:
+Save the `seeds` and `rounds` arrays from the public `/api/fairness` responses to a JSON file, then run:
 
 ```sh
 node tools/verify-fairness.js fairness-export.json
 ```
 
-The tool reports verified, pending, or mismatched records. It uses an independent implementation rather than importing the Worker formula. A clean result verifies only the supplied records; it cannot prove that no history was omitted or that deployed code was never changed. See [`docs/fairness-verification.md`](docs/fairness-verification.md) for the input format and limits.
+The script recomputes the commitments and crash points with Node's own crypto module rather than importing the Worker code, and reports each record as verified, pending or mismatched. See [docs/fairness-verification.md](docs/fairness-verification.md) for the file format.
 
 ## Run locally
 
-Requirements: Node.js 22+ and Python 3.
-
-```powershell
-cd backend
-npm.cmd ci
-npm.cmd test
-```
-
-The committed `backend/package-lock.json` makes dependency installation reproducible. If your npm settings block the `esbuild` or `workerd` install scripts, review npm’s prompt and approve the required scripts before rerunning installation. For the frontend, start a server from the repository root in a separate terminal:
+You need Node.js 22+ and Python 3. Serve the frontend from the repository root:
 
 ```powershell
 py -m http.server 5500
 ```
 
-Open `http://localhost:5500`; do not use a `file://` URL. `backend-config.js` contains the public Worker URL, not a secret.
+Open `http://localhost:5500` (not a `file://` URL). By default it talks to the deployed Worker set in `backend-config.js`; that URL is public, not a secret.
+
+To run the Worker locally as well, create a `.dev.vars` file with development secrets as shown in [backend/README.md](backend/README.md), then:
+
+```powershell
+cd backend
+npm.cmd ci
+npm.cmd run dev
+```
+
+and point `backend-config.js` at `http://localhost:8788` while you test.
+
+## Tests
+
+```powershell
+cd backend
+npm.cmd test
+```
+
+This runs the backend tests in `backend/test/` and the frontend module tests in `tests/frontend/`. They cover the crash formula, malformed requests, authentication, duplicate and concurrent requests, loans, alarms and reconnect handling. The integration tests start a local Worker with test-only secrets and never touch the deployed one. GitHub Actions runs the same suite on every push and pull request.
 
 ## Deploy
 
-1. Set `ALLOWED_ORIGINS` in `backend/wrangler.toml` to comma-separated exact origins such as `"http://localhost:5500,https://USERNAME.github.io"`. Do not include the repository path.
-2. Configure `SESSION_SECRET` and `SEED_ENCRYPTION_KEY` as Cloudflare Worker secrets. Never put their values in Git.
-3. Run `npm.cmd test` from `backend/`; deploy only after the full suite passes, using `npm.cmd run deploy`.
-4. Enable GitHub Pages from the repository root, keeping `index.html`, `styles.css`, `game.js`, `api-client.js`, `game-renderer.js`, `galaxy-background.js`, `fairness-client.js`, `round-clock.js`, `browser-storage.js`, `backend-config.js`, and `honk-icon.png` at the root.
+The Worker is deployed with Wrangler and the frontend is served by GitHub Pages from the repository root. The secrets and the steps are in [backend/README.md](backend/README.md#deploy).
 
-Back up both secrets securely. Losing or replacing the encryption key without migrating stored data makes unrevealed seeds unreadable. Anonymous session data persists in the same browser profile and does not sync across devices.
+## Limitations
+
+- The fairness check proves that the published records match their commitments. It can't prove that no round was left out of the history or that the deployed code never changed.
+- The multiplier on screen is an estimate from the server's start time; network delay can make the crash notice arrive late.
+- Sessions are anonymous and live in one browser profile. They don't sync between devices.
+- There is no rate limiting, so heavy automated traffic could use up the Cloudflare free-tier quota. See [SECURITY.md](SECURITY.md).
