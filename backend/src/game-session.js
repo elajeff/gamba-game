@@ -13,9 +13,18 @@ import {
   PUBLIC_HISTORY_LIMIT,
   STARTING_GOLD,
   calculatePayout,
+  emptyLoanFlags,
   readRequestedMultiplierCents,
   resolveCashoutMultiplierCents
 } from "./game-rules.js";
+
+const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_-]{16,100}$/;
+
+function requireIdempotencyKey(key) {
+  if (!key || !IDEMPOTENCY_KEY_PATTERN.test(key)) {
+    throw new ApiError(400, "idempotency_key_required", "Send a unique Idempotency-Key header (16–100 URL-safe characters).");
+  }
+}
 
 export class GameSession {
   constructor(ctx, env) {
@@ -253,8 +262,8 @@ export class GameSession {
       edgePercent: edge,
       currentEpoch: 1,
       activeLoans: [],
-      loansTaken: { "444": false, "888": false, "1500": false },
-      loansRepaid: { "444": false, "888": false, "1500": false },
+      loansTaken: emptyLoanFlags(),
+      loansRepaid: emptyLoanFlags(),
       history: []
     };
     this.ctx.storage.transactionSync(() => {
@@ -271,7 +280,7 @@ export class GameSession {
       balance: state.balance, roundNumber: state.roundNumber, gameOver: state.gameOver,
       waitingForLoan: state.waitingForLoan, clientSeed: state.clientSeed,
       activeLoans: state.activeLoans, loansTaken: state.loansTaken,
-      loansRepaid: state.loansRepaid || { "444": false, "888": false, "1500": false },
+      loansRepaid: state.loansRepaid || emptyLoanFlags(),
       activeRound: active ? { id: active.id, stake: active.stake, startedAt: active.started_at, commitment: this.currentCommitment() } : null,
       history: state.history.slice(-PUBLIC_HISTORY_LIMIT)
     };
@@ -323,7 +332,7 @@ export class GameSession {
       throw new ApiError(400, "idempotency_key_required", "Send a unique Idempotency-Key header (16–90 URL-safe characters).");
     }
     const startKey = body?.startKey;
-    if (typeof startKey !== "string" || !/^[A-Za-z0-9_-]{16,100}$/.test(startKey)) {
+    if (typeof startKey !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(startKey)) {
       throw new ApiError(400, "start_key_required", "Provide the idempotency key used to start the round.");
     }
     const requestedMultiplierCents = readRequestedMultiplierCents(body);
@@ -434,7 +443,7 @@ export class GameSession {
 
   async startRound(body, idempotencyKey, receivedAtHeader = null) {
     // Let the core perform the standard key validation for malformed requests.
-    if (!idempotencyKey || !/^[A-Za-z0-9_-]{16,100}$/.test(idempotencyKey)) {
+    if (!idempotencyKey || !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
       return this.startRoundCore(body, idempotencyKey);
     }
     const cached = this.cachedIdempotent(idempotencyKey, "round-start");
@@ -478,7 +487,7 @@ export class GameSession {
   async startRoundCore(body, idempotencyKey) {
     const state = this.readState();
     if (!state) throw new ApiError(409, "session_not_initialized", "Create a session first.");
-    if (!idempotencyKey || !/^[A-Za-z0-9_-]{16,100}$/.test(idempotencyKey)) throw new ApiError(400, "idempotency_key_required", "Send a unique Idempotency-Key header (16–100 URL-safe characters).");
+    requireIdempotencyKey(idempotencyKey);
     // Bound orphaned intents from starts that failed before creating a round, but preserve
     // an intent associated with this same in-flight idempotency key.
     this.cleanupExpiredRecords();
@@ -590,7 +599,7 @@ export class GameSession {
     state.balance += payout;
     state.roundNumber += 1;
     const repayments = [];
-    if (!state.loansRepaid) state.loansRepaid = { "444": false, "888": false, "1500": false };
+    if (!state.loansRepaid) state.loansRepaid = emptyLoanFlags();
     // Collect affordable repayments in nearest-deadline order before advancing deadlines.
     const dueOrder = [...state.activeLoans].sort((a, b) => a.roundsLeft - b.roundsLeft || a.principal - b.principal);
     for (const loan of dueOrder) {
@@ -616,7 +625,7 @@ export class GameSession {
   async cashOut(body, idempotencyKey) {
     const state = this.readState();
     if (!state) throw new ApiError(409, "session_not_initialized", "Create a session first.");
-    if (!idempotencyKey || !/^[A-Za-z0-9_-]{16,100}$/.test(idempotencyKey)) throw new ApiError(400, "idempotency_key_required", "Send a unique Idempotency-Key header.");
+    requireIdempotencyKey(idempotencyKey);
     const cached = this.cachedIdempotent(idempotencyKey, "cashout");
     if (cached) return json(cached);
     const roundId = body?.roundId;
@@ -735,8 +744,8 @@ export class GameSession {
   async takeLoan(body, idempotencyKey) {
     const state = this.readState();
     if (!state) throw new ApiError(409, "session_not_initialized", "Create a session first.");
-    if (!idempotencyKey || !/^[A-Za-z0-9_-]{16,100}$/.test(idempotencyKey)) throw new ApiError(400, "idempotency_key_required", "Send a unique Idempotency-Key header.");
-    if (!state.loansRepaid) state.loansRepaid = { "444": false, "888": false, "1500": false };
+    requireIdempotencyKey(idempotencyKey);
+    if (!state.loansRepaid) state.loansRepaid = emptyLoanFlags();
     const cached = this.cachedIdempotent(idempotencyKey, "loan");
     if (cached) return json(cached);
     const principal = Number(body?.principal);
@@ -781,7 +790,7 @@ export class GameSession {
   async resetGame(idempotencyKey) {
     const state = this.readState();
     if (!state) throw new ApiError(409, "session_not_initialized", "Create a session first.");
-    if (!idempotencyKey || !/^[A-Za-z0-9_-]{16,100}$/.test(idempotencyKey)) throw new ApiError(400, "idempotency_key_required", "Send a unique Idempotency-Key header.");
+    requireIdempotencyKey(idempotencyKey);
     const cached = this.cachedIdempotent(idempotencyKey, "reset");
     if (cached) return json(cached);
     if (this.getActiveRound()) throw new ApiError(409, "round_in_progress", "A round must settle before resetting.");
@@ -797,8 +806,8 @@ export class GameSession {
     const newState = {
       ...state, balance: STARTING_GOLD, roundNumber: 0, gameOver: false, waitingForLoan: false,
       clientSeed: null, currentEpoch: oldEpoch + 1, activeLoans: [],
-      loansTaken: { "444": false, "888": false, "1500": false },
-      loansRepaid: { "444": false, "888": false, "1500": false }, history: []
+      loansTaken: emptyLoanFlags(),
+      loansRepaid: emptyLoanFlags(), history: []
     };
     this.ctx.storage.transactionSync(() => {
       const latestState = this.readState();
@@ -820,9 +829,7 @@ export class GameSession {
   async endGame(idempotencyKey) {
     const state = this.readState();
     if (!state) throw new ApiError(409, "session_not_initialized", "Create a session first.");
-    if (!idempotencyKey || !/^[A-Za-z0-9_-]{16,100}$/.test(idempotencyKey)) {
-      throw new ApiError(400, "idempotency_key_required", "Send a unique Idempotency-Key header.");
-    }
+    requireIdempotencyKey(idempotencyKey);
     const cached = this.cachedIdempotent(idempotencyKey, "end-game");
     if (cached) return json(cached);
     if (this.getActiveRound()) throw new ApiError(409, "round_in_progress", "A round must settle before ending the game.");

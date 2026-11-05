@@ -12,6 +12,11 @@ export const LOANS = {
   1500: { principal: 1500, repayment: 2025, rounds: 4 }
 };
 
+// A fresh { "444": false, "888": false, "1500": false } object for tracking loans.
+export function emptyLoanFlags() {
+  return Object.fromEntries(Object.keys(LOANS).map(principal => [principal, false]));
+}
+
 function validateRequestedMultiplierCents(value) {
   if (value === undefined) return undefined; // Older clients may omit this value.
   if (!Number.isSafeInteger(value) || value < 100 || value > MAX_MULTIPLIER * 100) {
