@@ -28,7 +28,7 @@ SEED_ENCRYPTION_KEY="$seedKey"
 Remove-Variable sessionSecret, seedKey
 ```
 
-The integration suite starts a temporary local Worker with test-only secrets and isolated storage. It never calls production. Backend unit/session tests live in `test/`; frontend module and contract tests live in `../tests/frontend/`. `npm.cmd test` runs both groups. Formula, loan, alarm, and session-invariant tests run as regular Node tests.
+The integration suite starts a temporary local Worker with test-only secrets and isolated storage. It never calls production. Backend unit/session tests live in `test/`; frontend module and contract tests live in `../tests/frontend/`. `npm.cmd test` runs both groups.
 
 ## Secrets
 
@@ -69,6 +69,5 @@ Generate `SESSION_SECRET` independently. Back up both securely. Replacing or los
 
 - The API uses signed bearer tokens, exact-origin CORS, bounded JSON bodies, idempotency keys and non-cacheable responses with basic security headers. CORS isn't API authentication.
 - Round status is checked by the browser once per second while visible; hidden tabs pause polling. Durable Object alarms settle unattended rounds.
-- Writes are kept small: there is no per-action audit table and the start response is not stored twice. The game state, seed commitments, round history, idempotency records and session statistics are kept.
 - Gameplay has no application-level cooldowns or round caps; game state and settlement remain server-authoritative.
 - Seed commitment/reveal checks consistency between the published commitment and recorded deterministic outcomes. It is not an independent audit that proves no round was withheld.

@@ -11,11 +11,11 @@
 - `browser-storage.js` handles saving and restoring the guest session and the last revealed fairness seed, including the migration from the older tab-only session storage. Storage failures do not replace the server as the source of truth.
 - `api-client.js` handles authenticated HTTP requests, timeouts, idempotent retries and API errors; it reads the current session token through a small callback instead of owning game state.
 - `game-renderer.js` updates the DOM from supplied current state. It does not make network requests or decide game outcomes.
-- `galaxy-background.js` paints the existing static particle field. It is isolated from wallet and round state; its rendering algorithm and styles are intentionally unchanged.
+- `galaxy-background.js` paints the existing static particle field. It is isolated from wallet and round state.
 - `fairness-client.js` retrieves paginated public history and verifies revealed commitments and completed rounds. It reports results to `game.js`; it does not access the DOM.
 - `backend/src/index.js` is the HTTP Worker entry point. It validates browser origins, authenticates session requests, forwards requests to the Durable Object and applies the CORS response headers.
 - `backend/src/api-utils.js` owns the common JSON response, bounded JSON parsing and expected API error helpers.
-- `backend/src/database-schema.js` contains table creation, indexes and the existing compatibility migration.
+- `backend/src/database-schema.js` contains table creation, indexes and the migration that adds `edge_percent` to older databases.
 - `backend/src/session-stats.js` records settled-round statistics and reads the profile/leaderboard. The Durable Object calls these functions so statistics remain part of the caller’s existing transaction while their SQL is easier to review separately.
 - `backend/src/game-rules.js` holds the named game constants and cash-out multiplier validation/calculation.
 - `backend/src/seed-crypto.js` encrypts server seed records at rest and decrypts them only when required by round processing.
