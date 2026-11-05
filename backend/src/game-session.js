@@ -610,7 +610,7 @@ export class GameSession {
     const historyItem = { round: state.roundNumber, roundId: round.id, stake: round.stake, payout, multiplier, net, result, repayments, at: now };
     state.history.push(historyItem);
     if (state.history.length > 100) state.history = state.history.slice(-100);
-    return { state, historyItem, repayments, defaultedLoan: expired || null };
+    return { state, historyItem, repayments, defaultedLoan: state.gameOver ? expired : null };
   }
 
   async cashOut(body, idempotencyKey) {

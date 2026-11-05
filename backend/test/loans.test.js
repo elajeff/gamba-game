@@ -114,7 +114,7 @@ test("an expired debt at zero balance gives the player a loan decision", () => {
   assert.equal(gameState.activeLoans[0].roundsLeft, 0);
   assert.equal(gameState.gameOver, false);
   assert.equal(gameState.waitingForLoan, true);
-  assert.equal(settlement.defaultedLoan.principal, 888);
+  assert.equal(settlement.defaultedLoan, null);
 });
 
 test("repays only affordable debts and prioritizes the nearest deadline", () => {
