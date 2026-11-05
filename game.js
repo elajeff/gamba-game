@@ -3,7 +3,7 @@ import { createGameRenderer } from "./game-renderer.js";
 import { initGalaxyCanvas } from "./galaxy-background.js";
 import { verifyFairnessHistory } from "./fairness-client.js";
 import { calculateVisibleMultiplier, estimateServerTime, nextServerTimeAnchor } from "./round-clock.js";
-import { readLastReveal as loadLastReveal, readStoredSession, storeLastReveal, storeSession as persistSession } from "./browser-storage.js";
+import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from "./browser-storage.js";
 
 /*
  * gamba — backend-connected browser client
@@ -138,7 +138,6 @@ import { readLastReveal as loadLastReveal, readStoredSession, storeLastReveal, s
     profile: { stats: null, leaderboard: [] },
     roundNumber: 0,
     commitment: null,
-    epoch: 1,
     clientSeed: null,
     lastReveal: null
   };
@@ -158,7 +157,7 @@ import { readLastReveal as loadLastReveal, readStoredSession, storeLastReveal, s
     maxMultiplier: MAX_MULTIPLIER,
     getGame: () => game,
     formatGold,
-    hasUsedAllLoans: () => hasUsedAllLoans()
+    hasUsedAllLoans
   });
   const { setMessage, setRoundStatus, renderHistory, renderProfile, updateLoanOptions, updateMultiplierDisplay, updateUI } = renderer;
 
@@ -172,7 +171,7 @@ import { readLastReveal as loadLastReveal, readStoredSession, storeLastReveal, s
 
   function loadSavedLastReveal() {
     try {
-      return loadLastReveal(localStorage, sessionStorage, LAST_REVEAL_KEY);
+      return readLastReveal(localStorage, sessionStorage, LAST_REVEAL_KEY);
     } catch {
       return null;
     }
@@ -226,7 +225,7 @@ import { readLastReveal as loadLastReveal, readStoredSession, storeLastReveal, s
   }
 
   function renderFairness() {
-    elements.fairnessEpoch.textContent = game.epoch ? "CURRENT SEED" : "—";
+    elements.fairnessEpoch.textContent = "CURRENT SEED";
     elements.fairnessCommitment.textContent = game.commitment || "Waiting for server commitment…";
     elements.fairnessClientSeed.textContent = game.clientSeed || "Client seed not set";
     elements.copyCommitmentButton.disabled = !game.commitment;
@@ -425,7 +424,6 @@ import { readLastReveal as loadLastReveal, readStoredSession, storeLastReveal, s
 
   function updateCommitment(snapshot) {
     if (snapshot?.commitment) game.commitment = snapshot.commitment;
-    if (snapshot?.epoch) game.epoch = Number(snapshot.epoch);
     renderFairness();
   }
 
@@ -579,7 +577,7 @@ import { readLastReveal as loadLastReveal, readStoredSession, storeLastReveal, s
     game.sessionId = created.sessionId;
     game.token = created.token;
     try {
-      persistSession(localStorage, sessionStorage, SESSION_STORAGE_KEY, {
+      storeSession(localStorage, sessionStorage, SESSION_STORAGE_KEY, {
         sessionId: game.sessionId,
         token: game.token
       });
