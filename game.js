@@ -864,7 +864,7 @@ import { readLastReveal as loadLastReveal, readStoredSession, storeLastReveal, s
       setMessage(`Payout ${formatGold(payout)} gold · net ${net >= 0 ? "+" : "−"}${formatGold(Math.abs(net))}.`, "success");
     }
 
-    if (response.defaultedLoan || response.state.gameOver) {
+    if (response.state.gameOver) {
       showGameOver("LOAN DEFAULT", "An overdue loan could not be repaid. This game has ended.", "Loan not repaid");
     } else if (response.state.waitingForLoan && response.state.balance <= 0) {
       showBankruptcyPrompt();

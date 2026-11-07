@@ -81,7 +81,7 @@ test("round settlement chooses one modal path per server response", () => {
   const match = js.match(/async function finishFromServerResult\(response, roundId\)\s*\{([\s\S]*?)\n  \}\n\n  function showCashoutPending/);
   assert.ok(match, "Settlement handler should remain easy to audit");
   assert.match(match[1], /applyState\(response\.state, response\.profile, \{ updateModals: false \}\)/);
-  assert.match(match[1], /if \(response\.defaultedLoan \|\| response\.state\.gameOver\)[\s\S]*?else if \(response\.state\.waitingForLoan && response\.state\.balance <= 0\)[\s\S]*?else \{/);
+  assert.match(match[1], /if \(response\.state\.gameOver\)[\s\S]*?else if \(response\.state\.waitingForLoan && response\.state\.balance <= 0\)[\s\S]*?else \{/);
 });
 
 
