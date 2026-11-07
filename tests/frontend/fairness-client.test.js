@@ -27,16 +27,9 @@ test("browser fairness verifier independently checks a valid supplied history", 
 });
 
 test("browser fairness verifier reports a mismatching crash point", async () => {
-  const report = await verifyFairnessHistory(async () => apiResponse(1.4));
-  assert.equal(report.verifiedSeeds, 1);
-  assert.equal(report.verifiedRounds, 0);
-  assert.match(report.failures.join(" "), /crash point mismatch/);
-});
-
-
-test("browser fairness verifier rejects nonnumeric crash points", async () => {
-  for (const value of ["invalid", "NaN", "Infinity"]) {
-    const report = await verifyFairnessHistory(async () => apiResponse(value));
+  for (const crashPoint of [1.4, "invalid", "NaN", "Infinity"]) {
+    const report = await verifyFairnessHistory(async () => apiResponse(crashPoint));
+    assert.equal(report.verifiedSeeds, 1);
     assert.equal(report.verifiedRounds, 0);
     assert.match(report.failures.join(" "), /crash point mismatch/);
   }
