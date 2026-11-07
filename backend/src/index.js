@@ -35,7 +35,7 @@ export default {
 
     try {
       if (request.method === "GET" && url.pathname === "/health") {
-        return json({ ok: true, service: "gamba-crash-backend", protocol: 1 }, 200, cors);
+        return json({ ok: true, service: "gamba-crash-backend" }, 200, cors);
       }
       if (request.method === "POST" && url.pathname === "/api/session") {
         if (!env.SESSION_SECRET || !env.SEED_ENCRYPTION_KEY) return json({ error: "server_not_configured" }, 503, cors);

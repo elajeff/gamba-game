@@ -234,7 +234,7 @@ export class GameSession {
       this.sql.exec("INSERT INTO seeds(epoch,commitment,seed_iv,seed_cipher,created_at) VALUES(1,?,?,?,?)", commitment, encrypted.iv, encrypted.ciphertext, Date.now());
       this.sql.exec("INSERT OR IGNORE INTO session_stats(id,updated_at) VALUES(1,?)", Date.now());
     });
-    return json({ state: this.publicState(state), commitment, epoch: 1, clientSeedRequired: true, serverTime: Date.now(), profile: readProfileData(this.sql) });
+    return json({ state: this.publicState(state), commitment, epoch: 1, serverTime: Date.now(), profile: readProfileData(this.sql) });
   }
 
   publicState(state) {
@@ -256,8 +256,7 @@ export class GameSession {
   }
 
   stateResponse() {
-    const state = this.readState();
-    if (!state) return json({ error: "session_not_initialized" }, 409);
+    const state = requireState(this.readState());
     return json({ state: this.publicState(state), commitment: this.currentCommitment(), epoch: state.currentEpoch, serverTime: Date.now(), profile: readProfileData(this.sql) });
   }
 
@@ -525,7 +524,7 @@ export class GameSession {
     const historyItem = { round: state.roundNumber, roundId: round.id, stake: round.stake, payout, multiplier, net, result, repayments, at: now };
     state.history.push(historyItem);
     if (state.history.length > STORED_HISTORY_LIMIT) state.history = state.history.slice(-STORED_HISTORY_LIMIT);
-    return { state, historyItem, repayments, defaultedLoan: expired || null };
+    return { state, historyItem, repayments };
   }
 
   // Must run inside a transaction. The early release in startRoundCore calls this
@@ -545,7 +544,6 @@ export class GameSession {
       state: this.publicState(settled.state),
       historyItem: settled.historyItem,
       repayments: settled.repayments,
-      defaultedLoan: settled.defaultedLoan,
       profile: readProfileData(this.sql)
     };
   }
@@ -595,7 +593,7 @@ export class GameSession {
   }
 
   async roundStatus(id) {
-    if (!id) return json({ error: "round_id_required" }, 400);
+    if (!id) throw new ApiError(400, "round_id_required", "Provide the active round ID.");
     const round = this.sql.exec("SELECT * FROM rounds WHERE id=?", id).toArray()[0];
     if (!round) throw new ApiError(404, "round_not_found", "Round was not found.");
     const state = this.readState();
@@ -723,15 +721,13 @@ export class GameSession {
     const limit = Number.isSafeInteger(rawLimit) ? Math.min(100, Math.max(1, rawLimit)) : 100;
     const roundOffset = Number.isSafeInteger(rawRoundOffset) ? Math.max(0, rawRoundOffset) : 0;
     const seedOffset = Number.isSafeInteger(rawSeedOffset) ? Math.max(0, rawSeedOffset) : 0;
-    const state = this.readState();
-    if (!state) return json({ error: "session_not_initialized" }, 409);
+    const state = requireState(this.readState());
     const totalSeeds = Number(this.sql.exec("SELECT COUNT(*) AS count FROM seeds").toArray()[0]?.count || 0);
     const totalRounds = Number(this.sql.exec("SELECT COUNT(*) AS count FROM rounds").toArray()[0]?.count || 0);
     const seeds = this.sql.exec("SELECT epoch,commitment,created_at,revealed_seed,revealed_at FROM seeds ORDER BY epoch ASC LIMIT ? OFFSET ?", limit, seedOffset).toArray();
     const rounds = this.sql.exec("SELECT id,nonce,epoch,client_seed,stake,started_at,edge_percent,CASE WHEN status='running' THEN NULL ELSE crash_point END AS crash_point,status,payout,cashed_out_at FROM rounds ORDER BY started_at ASC,id ASC LIMIT ? OFFSET ?", limit, roundOffset).toArray();
     return json({ currentEpoch: state.currentEpoch, currentCommitment: this.currentCommitment(), houseEdgePercent: state.edgePercent,
       totalSeeds, totalRounds, seedOffset, roundOffset,
-      hasMoreSeeds: seedOffset + seeds.length < totalSeeds, hasMoreRounds: roundOffset + rounds.length < totalRounds,
       seeds, rounds });
   }
 }

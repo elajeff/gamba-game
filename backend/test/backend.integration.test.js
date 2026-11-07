@@ -226,7 +226,6 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
     assert.equal(session.state.roundNumber, 0);
     assert.equal(session.epoch, 1);
     assert.match(session.commitment, /^[0-9a-f]{64}$/);
-    assert.equal(session.clientSeedRequired, true);
     assert.equal(session.profile?.stats?.roundsPlayed, 0);
     assert.deepEqual(session.profile?.leaderboard, []);
     assert.ok(session.token);

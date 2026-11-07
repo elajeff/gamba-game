@@ -95,12 +95,11 @@ test("an expired debt with positive but insufficient balance causes default", ()
     activeLoans: [{ principal: 444, repayment: 533, roundsLeft: 1 }]
   });
 
-  const settlement = settleRound(gameState);
+  settleRound(gameState);
 
   assert.equal(gameState.activeLoans[0].roundsLeft, 0);
   assert.equal(gameState.gameOver, true);
   assert.equal(gameState.waitingForLoan, false);
-  assert.equal(settlement.defaultedLoan.principal, 444);
 });
 
 test("an expired debt at zero balance gives the player a loan decision", () => {
@@ -109,12 +108,11 @@ test("an expired debt at zero balance gives the player a loan decision", () => {
     activeLoans: [{ principal: 888, repayment: 1110, roundsLeft: 1 }]
   });
 
-  const settlement = settleRound(gameState);
+  settleRound(gameState);
 
   assert.equal(gameState.activeLoans[0].roundsLeft, 0);
   assert.equal(gameState.gameOver, false);
   assert.equal(gameState.waitingForLoan, true);
-  assert.equal(settlement.defaultedLoan.principal, 888);
 });
 
 test("repays only affordable debts and prioritizes the nearest deadline", () => {
