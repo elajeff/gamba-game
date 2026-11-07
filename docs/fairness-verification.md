@@ -4,7 +4,7 @@
 
 ## Input format
 
-`/api/fairness` needs the session's bearer token, which `POST /api/session` returns and the game also keeps in local storage. Each call returns up to 100 seeds and 100 rounds, and `hasMoreSeeds` and `hasMoreRounds` say whether to ask for more with `seedOffset` and `roundOffset`.
+`/api/fairness` needs the session's bearer token, which `POST /api/session` returns and the game also keeps in local storage. Each call returns up to 100 seeds and 100 rounds, and the reply includes `totalSeeds` and `totalRounds`. Ask for the next pages with `seedOffset` and `roundOffset` until you have that many of each.
 
 Put the `seeds` and `rounds` from every page into one UTF-8 JSON file, unchanged. `houseEdgePercent` is optional:
 
