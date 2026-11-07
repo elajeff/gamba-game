@@ -1,7 +1,7 @@
-import { bytesToHex, hexToBytes, sha256Hex, hmacBytesWithKey } from "./crypto-utils.js";
+import { bytesToHex, hexToBytes, sha256Hex, hmacBytes } from "./crypto-utils.js";
 import { crashPointFromDigest } from "./fairness.js";
 import { logOperationalError, logUnexpectedRequestError } from "./request-logging.js";
-import { ApiError, json, readJsonLimited, safeParse } from "./api-utils.js";
+import { ApiError, json, readJsonLimited } from "./api-utils.js";
 import { decryptSeed, encryptSeed } from "./seed-crypto.js";
 import { initializeGameSessionSchema } from "./database-schema.js";
 import { readProfileData, recordSettledRound } from "./session-stats.js";
@@ -12,6 +12,7 @@ import {
   MAX_MULTIPLIER,
   PUBLIC_HISTORY_LIMIT,
   STARTING_GOLD,
+  STORED_HISTORY_LIMIT,
   calculatePayout,
   emptyLoanFlags,
   readRequestedMultiplierCents,
@@ -19,6 +20,8 @@ import {
 } from "./game-rules.js";
 
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_-]{16,100}$/;
+const EARLY_RELEASE_WINDOW_MS = 60_000;
+const START_RESERVATION_TIMEOUT_MS = 30_000;
 
 function requireIdempotencyKey(key) {
   if (!key || !IDEMPOTENCY_KEY_PATTERN.test(key)) {
@@ -26,14 +29,21 @@ function requireIdempotencyKey(key) {
   }
 }
 
+function requireState(state) {
+  if (!state) throw new ApiError(409, "session_not_initialized", "Create a session first.");
+  return state;
+}
+
+function liveMultiplierAt(round, now) {
+  const elapsedSeconds = Math.max(0, (now - Number(round.started_at)) / 1000);
+  return Math.min(MAX_MULTIPLIER, 1 + elapsedSeconds * GROWTH_PER_SECOND);
+}
+
 export class GameSession {
   constructor(ctx, env) {
     this.ctx = ctx;
     this.env = env;
     this.sql = ctx.storage.sql;
-    // Cache only a non-extractable HMAC CryptoKey, never the decrypted server-seed string.
-    // The key is scoped to an immutable seed epoch/commitment and replaced on rotation.
-    this.cachedRoundHmacKey = null;
     this.pendingStartPromises = new Map();
     initializeGameSessionSchema(this.sql);
     // Recover an active round created before a deploy or browser interruption.
@@ -50,7 +60,7 @@ export class GameSession {
 
   readState() {
     const row = this.sql.exec("SELECT value FROM meta WHERE key='state'").toArray()[0];
-    return row ? safeParse(row.value, null) : null;
+    return row ? JSON.parse(row.value) : null;
   }
 
   writeState(state) {
@@ -67,57 +77,14 @@ export class GameSession {
     return Number(round.started_at) + Math.max(0, durationMs);
   }
 
-  async clearSettlementAlarm(settledRoundId = null) {
+  async clearSettlementAlarm(settledRoundId) {
     try {
       // A background cleanup for an older round must never delete a newer round's alarm.
-      const active = settledRoundId ? this.getActiveRound() : null;
+      const active = this.getActiveRound();
       if (active && active.id !== settledRoundId) return;
       await this.ctx.storage.deleteAlarm();
     } catch (error) {
       logOperationalError("settlement_alarm_cleanup_failed", { roundId: settledRoundId }, error);
-    }
-  }
-
-  deferSettlementAlarmCleanup(roundId) {
-    // Alarm cleanup is housekeeping, not part of payout confirmation. Keep it off the
-    // response's critical path while ensuring it cannot cancel a later round's alarm.
-    const cleanup = this.clearSettlementAlarm(roundId);
-    if (typeof this.ctx.waitUntil === "function") this.ctx.waitUntil(cleanup);
-    else void cleanup;
-  }
-
-  async getRoundHmacKey(seedRow) {
-    const epoch = Number(seedRow.epoch);
-    const commitment = seedRow.commitment;
-    const cached = this.cachedRoundHmacKey;
-    if (cached && cached.epoch === epoch && cached.commitment === commitment) return cached.key;
-
-    // Concurrent cold starts for the same epoch share one decrypt/import operation.
-    const pending = this.roundHmacKeyPromise;
-    if (pending && pending.epoch === epoch && pending.commitment === commitment) return pending.promise;
-
-    const record = { epoch, commitment, promise: null };
-    record.promise = (async () => {
-      const seed = await decryptSeed(seedRow.seed_iv, seedRow.seed_cipher, this.env.SEED_ENCRYPTION_KEY);
-      const seedBytes = hexToBytes(seed);
-      let key;
-      try {
-        key = await crypto.subtle.importKey(
-          "raw", seedBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
-        );
-      } finally {
-        seedBytes.fill(0);
-      }
-      // A reset can rotate epochs while the decrypt/import promise is in flight.
-      // Do not let an old epoch overwrite a newer epoch's cache.
-      if (this.roundHmacKeyPromise === record) this.cachedRoundHmacKey = { epoch, commitment, key };
-      return key;
-    })();
-    this.roundHmacKeyPromise = record;
-    try {
-      return await record.promise;
-    } finally {
-      if (this.roundHmacKeyPromise === record) this.roundHmacKeyPromise = null;
     }
   }
 
@@ -127,15 +94,14 @@ export class GameSession {
     const state = this.readState();
     if (!state) return;
     const now = Date.now();
-    const elapsed = Math.max(0, (now - Number(round.started_at)) / 1000);
-    const liveMultiplier = Math.min(MAX_MULTIPLIER, 1 + elapsed * GROWTH_PER_SECOND);
+    const liveMultiplier = liveMultiplierAt(round, now);
     // Preserve the same boundary rule as cash-out/status: crash check precedes the x10 cap.
     if (liveMultiplier >= Number(round.crash_point)) {
-      await this.settleBust(round, state, now);
+      this.settleBust(round, state, now);
       return;
     }
     if (liveMultiplier >= MAX_MULTIPLIER) {
-      await this.settleAtCap(round, state, now);
+      this.settleAtCap(round, state, now);
       return;
     }
     // Alarms are at-least-once; if the platform fires a little early, reschedule once the due time is reached.
@@ -228,14 +194,14 @@ export class GameSession {
       now - roundStartRetentionMs
     );
     // Early intents only bridge the short window between a start request and its commit.
-    this.sql.exec("DELETE FROM early_release_intents WHERE created_at < ?", now - 60_000);
+    this.sql.exec("DELETE FROM early_release_intents WHERE created_at < ?", now - EARLY_RELEASE_WINDOW_MS);
   }
 
   cachedIdempotent(key, action) {
     const row = this.sql.exec("SELECT action,response_json FROM idempotency WHERE key=?", key).toArray()[0];
     if (!row) return null;
     if (row.action !== action) throw new ApiError(409, "idempotency_key_reused", "This idempotency key was already used for a different action.");
-    return safeParse(row.response_json, null);
+    return JSON.parse(row.response_json);
   }
 
   storeIdempotent(key, action, response) {
@@ -296,15 +262,11 @@ export class GameSession {
   }
 
   async setClientSeed(body) {
-    const state = this.readState();
-    if (!state) throw new ApiError(409, "session_not_initialized", "Create a session first.");
+    const state = requireState(this.readState());
     if (this.getActiveRound()) throw new ApiError(409, "round_in_progress", "Client seed cannot change during a round.");
     const seed = body?.clientSeed;
     if (typeof seed !== "string" || seed.length < 8 || seed.length > MAX_CLIENT_SEED_LENGTH || !/^[\x21-\x7E]+$/.test(seed)) {
       throw new ApiError(400, "invalid_client_seed", "Client seed must be 8–128 printable ASCII characters without spaces.");
-    }
-    if (state.clientSeed === seed) {
-      return json({ clientSeed: seed, commitment: this.currentCommitment() });
     }
     state.clientSeed = seed;
     this.ctx.storage.transactionSync(() => this.writeState(state));
@@ -322,8 +284,7 @@ export class GameSession {
   }
 
   async releaseIntent(body, idempotencyKey) {
-    const state = this.readState();
-    if (!state) throw new ApiError(409, "session_not_initialized", "Create a session first.");
+    const state = requireState(this.readState());
     // Prefixing the internal cash-out key must remain inside the common 100-character limit.
     if (!idempotencyKey || !/^[A-Za-z0-9_-]{16,90}$/.test(idempotencyKey)) {
       throw new ApiError(400, "idempotency_key_required", "Send a unique Idempotency-Key header (16–90 URL-safe characters).");
@@ -373,7 +334,7 @@ export class GameSession {
     this.ctx.storage.transactionSync(() => {
       let reservation = this.sql.exec("SELECT idempotency_key,created_at FROM start_reservations WHERE id=1").toArray()[0];
       // Recover abandoned reservations after an isolate termination or unexpected exception.
-      if (reservation && now - Number(reservation.created_at) > 30_000) {
+      if (reservation && now - Number(reservation.created_at) > START_RESERVATION_TIMEOUT_MS) {
         this.sql.exec("DELETE FROM start_reservations WHERE id=1");
         reservation = null;
       }
@@ -419,7 +380,7 @@ export class GameSession {
     const cached = this.cachedIdempotent(idempotencyKey, "round-start");
     if (cached) return this.replayRoundStart(cached);
     const existing = this.sql.exec("SELECT response_json FROM rounds WHERE idempotency_key=?", idempotencyKey).toArray()[0];
-    if (existing?.response_json) return this.replayRoundStart(safeParse(existing.response_json, { error: "idempotency_replay" }));
+    if (existing?.response_json) return this.replayRoundStart(JSON.parse(existing.response_json));
 
     // Reuse the same in-flight operation for retries with the same idempotency key.
     const pending = this.pendingStartPromises.get(idempotencyKey);
@@ -455,8 +416,7 @@ export class GameSession {
   }
 
   async startRoundCore(body, idempotencyKey) {
-    const state = this.readState();
-    if (!state) throw new ApiError(409, "session_not_initialized", "Create a session first.");
+    const state = requireState(this.readState());
     // Bound orphaned intents from starts that failed before creating a round, but preserve
     // an intent associated with this same in-flight idempotency key.
     this.cleanupExpiredRecords();
@@ -477,9 +437,9 @@ export class GameSession {
     const clientSeed = state.clientSeed;
     const seedRow = this.sql.exec("SELECT * FROM seeds WHERE epoch=?", epoch).toArray()[0];
     if (!seedRow) throw new ApiError(500, "seed_missing", "Current fairness seed is unavailable.");
-    const hmacKey = await this.getRoundHmacKey(seedRow);
+    const seed = await decryptSeed(seedRow.seed_iv, seedRow.seed_cipher, this.env.SEED_ENCRYPTION_KEY);
     const nonce = state.roundNumber + 1;
-    const digest = await hmacBytesWithKey(hmacKey, `${clientSeed}:${nonce}`);
+    const digest = await hmacBytes(hexToBytes(seed), `${clientSeed}:${nonce}`);
     const crashPoint = crashPointFromDigest(digest, state.edgePercent);
     const roundId = crypto.randomUUID();
     const startedAt = Date.now();
@@ -506,7 +466,7 @@ export class GameSession {
         started_at: startedAt, crash_point: crashPoint, status: "running", edge_percent: state.edgePercent };
       const earlyRelease = this.sql.exec(
         "SELECT released_at FROM early_release_intents WHERE start_key=? AND created_at>=?",
-        idempotencyKey, startedAt - 60_000
+        idempotencyKey, startedAt - EARLY_RELEASE_WINDOW_MS
       ).toArray()[0];
       if (earlyRelease) {
         // The release reached the server before this round was committed. Its only fair
@@ -564,7 +524,7 @@ export class GameSession {
     const net = payout - round.stake - repaymentTotal;
     const historyItem = { round: state.roundNumber, roundId: round.id, stake: round.stake, payout, multiplier, net, result, repayments, at: now };
     state.history.push(historyItem);
-    if (state.history.length > 100) state.history = state.history.slice(-100);
+    if (state.history.length > STORED_HISTORY_LIMIT) state.history = state.history.slice(-STORED_HISTORY_LIMIT);
     return { state, historyItem, repayments, defaultedLoan: expired || null };
   }
 
@@ -597,13 +557,13 @@ export class GameSession {
       if (idempotencyKey) this.storeIdempotent(idempotencyKey, "cashout", response);
     });
     this.broadcastRoundSettled(response, round.id, round.idempotency_key);
-    this.deferSettlementAlarmCleanup(round.id);
+    // Alarm cleanup is housekeeping, so it stays off the response's critical path.
+    this.ctx.waitUntil(this.clearSettlementAlarm(round.id));
     return response;
   }
 
   async cashOut(body, idempotencyKey) {
-    const state = this.readState();
-    if (!state) throw new ApiError(409, "session_not_initialized", "Create a session first.");
+    const state = requireState(this.readState());
     requireIdempotencyKey(idempotencyKey);
     const cached = this.cachedIdempotent(idempotencyKey, "cashout");
     if (cached) return json(cached);
@@ -614,9 +574,8 @@ export class GameSession {
     if (!round) throw new ApiError(404, "round_not_found", "Round was not found.");
     if (round.status !== "running") throw new ApiError(409, "round_not_running", "This round is already settled.");
     const now = Date.now();
-    const elapsedSeconds = Math.max(0, (now - round.started_at) / 1000);
-    const liveMultiplier = Math.min(MAX_MULTIPLIER, 1 + elapsedSeconds * GROWTH_PER_SECOND);
-    if (liveMultiplier >= round.crash_point) return await this.settleBust(round, state, now, idempotencyKey);
+    const liveMultiplier = liveMultiplierAt(round, now);
+    if (liveMultiplier >= round.crash_point) return json(this.settleBust(round, state, now, idempotencyKey));
     // Never award more than either the visible release value or server time allows.
     // A delayed network request can reduce latency-induced display jumps, but cannot
     // make a late cash-out win after the server has reached the committed crash point.
@@ -626,11 +585,11 @@ export class GameSession {
     return json(this.commitSettlement(round, state, "cashed_out", multiplier, payout, now, idempotencyKey));
   }
 
-  async settleBust(round, state, now, idempotencyKey = null) {
-    return json(this.commitSettlement(round, state, "busted", round.crash_point, 0, now, idempotencyKey));
+  settleBust(round, state, now, idempotencyKey = null) {
+    return this.commitSettlement(round, state, "busted", round.crash_point, 0, now, idempotencyKey);
   }
 
-  async settleAtCap(round, state, now) {
+  settleAtCap(round, state, now) {
     // Alarm and status settlement has no client ceiling, so it pays exactly x10.
     return this.commitSettlement(round, state, "cashed_out", MAX_MULTIPLIER, calculatePayout(round.stake, MAX_MULTIPLIER * 100), now);
   }
@@ -642,10 +601,9 @@ export class GameSession {
     const state = this.readState();
     if (round.status === "running") {
       const serverTime = Date.now();
-      const elapsed = Math.max(0, (serverTime - round.started_at) / 1000);
-      const liveMultiplier = Math.min(MAX_MULTIPLIER, 1 + elapsed * GROWTH_PER_SECOND);
-      if (liveMultiplier >= round.crash_point) return await this.settleBust(round, state, Date.now());
-      if (liveMultiplier >= MAX_MULTIPLIER) return json({ status: "cashed_out", ...await this.settleAtCap(round, state, Date.now()) });
+      const liveMultiplier = liveMultiplierAt(round, serverTime);
+      if (liveMultiplier >= round.crash_point) return json(this.settleBust(round, state, serverTime));
+      if (liveMultiplier >= MAX_MULTIPLIER) return json({ status: "cashed_out", ...this.settleAtCap(round, state, serverTime) });
       return json({ status: "running", round: { id: round.id, startedAt: round.started_at, stake: round.stake }, multiplier: Math.floor(liveMultiplier * 100) / 100, serverTime });
     }
     const historyItem = state?.history?.find((item) => item.roundId === id) || null;
@@ -656,8 +614,7 @@ export class GameSession {
   }
 
   async takeLoan(body, idempotencyKey) {
-    const state = this.readState();
-    if (!state) throw new ApiError(409, "session_not_initialized", "Create a session first.");
+    const state = requireState(this.readState());
     requireIdempotencyKey(idempotencyKey);
     if (!state.loansRepaid) state.loansRepaid = emptyLoanFlags();
     const cached = this.cachedIdempotent(idempotencyKey, "loan");
@@ -702,8 +659,7 @@ export class GameSession {
   }
 
   async resetGame(idempotencyKey) {
-    const state = this.readState();
-    if (!state) throw new ApiError(409, "session_not_initialized", "Create a session first.");
+    const state = requireState(this.readState());
     requireIdempotencyKey(idempotencyKey);
     const cached = this.cachedIdempotent(idempotencyKey, "reset");
     if (cached) return json(cached);
@@ -741,8 +697,7 @@ export class GameSession {
   }
 
   async endGame(idempotencyKey) {
-    const state = this.readState();
-    if (!state) throw new ApiError(409, "session_not_initialized", "Create a session first.");
+    const state = requireState(this.readState());
     requireIdempotencyKey(idempotencyKey);
     const cached = this.cachedIdempotent(idempotencyKey, "end-game");
     if (cached) return json(cached);
@@ -762,13 +717,12 @@ export class GameSession {
   }
 
   fairness(searchParams) {
-    const params = searchParams instanceof URLSearchParams ? searchParams : new URLSearchParams();
-    const rawLimit = Number.parseInt(params.get("limit") || "100", 10);
-    const rawRoundOffset = Number.parseInt(params.get("roundOffset") || "0", 10);
-    const rawSeedOffset = Number.parseInt(params.get("seedOffset") || "0", 10);
+    const rawLimit = Number.parseInt(searchParams.get("limit") || "100", 10);
+    const rawRoundOffset = Number.parseInt(searchParams.get("roundOffset") || "0", 10);
+    const rawSeedOffset = Number.parseInt(searchParams.get("seedOffset") || "0", 10);
     const limit = Number.isSafeInteger(rawLimit) ? Math.min(100, Math.max(1, rawLimit)) : 100;
-    const roundOffset = Number.isSafeInteger(rawRoundOffset) ? Math.max(0, Math.min(2_000_000_000, rawRoundOffset)) : 0;
-    const seedOffset = Number.isSafeInteger(rawSeedOffset) ? Math.max(0, Math.min(2_000_000_000, rawSeedOffset)) : 0;
+    const roundOffset = Number.isSafeInteger(rawRoundOffset) ? Math.max(0, rawRoundOffset) : 0;
+    const seedOffset = Number.isSafeInteger(rawSeedOffset) ? Math.max(0, rawSeedOffset) : 0;
     const state = this.readState();
     if (!state) return json({ error: "session_not_initialized" }, 409);
     const totalSeeds = Number(this.sql.exec("SELECT COUNT(*) AS count FROM seeds").toArray()[0]?.count || 0);
