@@ -4,7 +4,7 @@
 
 A browser crash game. Hold to start a round, watch the multiplier climb, and release before it crashes. You play with in-game gold (888 to start, plus optional loans); there is no real money involved.
 
-The frontend is plain JavaScript on GitHub Pages. The backend is a Cloudflare Worker with one SQLite-backed Durable Object per player session, and the server decides every outcome and payout. The browser only handles input and display. Every crash point can be checked afterwards against a seed commitment published before the round, and the backend has regression tests for duplicate requests, races between cash-out and settlement, and disconnects.
+The frontend is plain JavaScript on GitHub Pages. The backend is a Cloudflare Worker with one SQLite-backed Durable Object per player session. The server decides every outcome and payout, and the browser only handles input and display. Once a seed is revealed, each of its rounds can be checked against the commitment published before they started. The backend tests cover duplicate requests, races between cash-out and settlement, and disconnects.
 
 ![A round in progress at x2.26, with personal bests on the left and recent rounds and bank loans on the right](docs/images/round.png)
 
@@ -30,7 +30,7 @@ crashCents = max(100, floor((100 - e) * D / (D - r)))
 crashMultiplier = crashCents / 100
 ```
 
-`e` is the house edge in percentage points (`1` means 1%). The result is rounded down to cents and is never below `1.00×`. Cash-outs are capped at `10×`. The same seed, nonce and edge always give the same result.
+`e` is the house edge in percentage points (`1` means 1%). The result is rounded down to cents and is never below `1.00×`. Cash-outs are capped at `10×`, and the crash point itself at `1,000,000×`. The same seed, nonce and edge always give the same result.
 
 Unrevealed seeds are stored encrypted with AES-256-GCM. The crash point is never sent while a round is running.
 
