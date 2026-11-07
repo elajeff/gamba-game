@@ -12,7 +12,7 @@ npm.cmd test
 npm.cmd run dev
 ```
 
-Keep the generated `package-lock.json` in Git for reproducible installs. If npm 11 reports blocked scripts for `esbuild` or `workerd`, review and approve those Wrangler dependencies with `npm.cmd install-scripts approve esbuild workerd`, then rerun `npm.cmd ci`.
+If npm 11 reports blocked scripts for `esbuild` or `workerd`, review and approve those Wrangler dependencies with `npm.cmd install-scripts approve esbuild workerd`, then rerun `npm.cmd ci`.
 
 The Worker listens on `http://localhost:8788`; serve the frontend separately from the repository root at `http://localhost:5500`.
 
@@ -25,28 +25,23 @@ $seedKey = (node -p "require('crypto').randomBytes(32).toString('base64')").Trim
 SESSION_SECRET="$sessionSecret"
 SEED_ENCRYPTION_KEY="$seedKey"
 "@ | Set-Content -Encoding ascii .dev.vars
-Remove-Variable sessionSecret, seedKey
 ```
-
-The integration suite starts a temporary local Worker with test-only secrets and isolated storage. It never calls production. Backend unit/session tests live in `test/`; frontend module and contract tests live in `../tests/frontend/`. `npm.cmd test` runs both groups.
 
 ## Secrets
 
-Set secrets with Wrangler. Never add them to `wrangler.toml`, frontend files or Git:
+Set secrets with Wrangler, not in `wrangler.toml`, frontend files or Git:
 
 - `SESSION_SECRET`: a private random value used to sign session tokens.
 - `SEED_ENCRYPTION_KEY`: Base64 encoding of 32 cryptographically random bytes, used to encrypt server seeds at rest.
 
-Example PowerShell command to generate and upload an encryption key without using the clipboard:
+To generate an encryption key and upload it:
 
 ```powershell
 $key = (node -p "require('crypto').randomBytes(32).toString('base64')").Trim()
-if ($key.Length -ne 44 -or $key -notmatch '^[A-Za-z0-9+/]{43}=$') { throw "Invalid key format" }
 $key | .\node_modules\.bin\wrangler.cmd secret put SEED_ENCRYPTION_KEY
-Remove-Variable key
 ```
 
-Generate `SESSION_SECRET` independently. Back up both securely. Replacing or losing `SEED_ENCRYPTION_KEY` without migrating stored data makes unrevealed seeds unreadable.
+Generate `SESSION_SECRET` separately. Keep a backup of both; if `SEED_ENCRYPTION_KEY` is lost or replaced, stored unrevealed seeds can't be read.
 
 ## Deploy
 
@@ -59,15 +54,28 @@ Generate `SESSION_SECRET` independently. Back up both securely. Replacing or los
    npx.cmd wrangler secret put SEED_ENCRYPTION_KEY
    ```
 
-3. From this folder, run `npm.cmd test`. Deploy only after the suite passes:
+3. From this folder, run `npm.cmd test`, then:
 
    ```powershell
    npm.cmd run deploy
    ```
 
-## Design notes
+## Endpoints
 
-- The API uses signed bearer tokens, exact-origin CORS, bounded JSON bodies, idempotency keys and non-cacheable responses with basic security headers. CORS isn't API authentication.
-- Round status is checked by the browser once per second while visible; hidden tabs pause polling. Durable Object alarms settle unattended rounds.
-- Gameplay has no application-level cooldowns or round caps; game state and settlement remain server-authoritative.
-- Seed commitment/reveal checks consistency between the published commitment and recorded deterministic outcomes. It is not an independent audit that proves no round was withheld.
+Everything except `/health` and `POST /api/session` needs the token `POST /api/session` returns, sent as an `Authorization: Bearer <token>` header (the events WebSocket sends it as a `gamba-auth.` subprotocol instead). Endpoints marked "key" also need an `Idempotency-Key` header.
+
+| Method and path | What it does |
+| --- | --- |
+| `GET /health` | Health check. |
+| `POST /api/session` | Creates a session and returns its ID, token, state and first seed commitment. |
+| `GET /api/state` | Returns the balance, loans, active round, recent history, commitment and profile. |
+| `POST /api/client-seed` | Sets the client seed (8 to 128 printable ASCII characters, no spaces). Not allowed during a round. |
+| `POST /api/round/start` | Starts a round with a whole-number stake. Key. |
+| `POST /api/round/release-intent` | Sends a release for the round started with the key in `startKey`. Settles the round if it exists, otherwise queues the release. Key. |
+| `POST /api/round/cashout` | Cashes out the round in `roundId`, capped by the server's own multiplier. Key. |
+| `GET /api/round/status?id=` | Returns a round's status and settles it first if it is due. |
+| `GET /api/round/events` | WebSocket that pushes round settlements. |
+| `POST /api/loan` | Takes a loan of 444, 888 or 1500 gold at a balance of zero. Key. |
+| `POST /api/game/reset` | Starts a new game, reveals the old seed and commits a new one. Key. |
+| `POST /api/game/end` | Ends the game at the zero-balance loan decision. Key. |
+| `GET /api/fairness` | Returns this session's seeds and rounds, up to 100 of each per call (`limit`, `seedOffset`, `roundOffset`). |
