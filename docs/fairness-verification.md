@@ -1,10 +1,12 @@
-# Independent fairness verification
+# Checking fairness
 
-The browser has a built-in check for the history currently available to that session. The standalone verifier is an additional tool that lets a reviewer reproduce the cryptographic calculations with Node.js, independently of the browser and Worker helper modules.
+`tools/verify-fairness.js` checks an export with Node, separately from the browser and Worker code. The game also has a "Verify past rounds" button.
 
 ## Input format
 
-Prepare a UTF-8 JSON file containing the complete `seeds` and `rounds` arrays returned by `/api/fairness`. The export may include the `houseEdgePercent` field. Keep the public API field names unchanged. For example:
+`/api/fairness` needs the session's bearer token, which `POST /api/session` returns and the game also keeps in local storage. Each call returns up to 100 seeds and 100 rounds, and `hasMoreSeeds` and `hasMoreRounds` say whether to ask for more with `seedOffset` and `roundOffset`.
+
+Put the `seeds` and `rounds` from every page into one UTF-8 JSON file, unchanged. `houseEdgePercent` is optional:
 
 ```json
 {
@@ -30,7 +32,7 @@ Prepare a UTF-8 JSON file containing the complete `seeds` and `rounds` arrays re
 }
 ```
 
-The example values are illustrative, not a real round record. Include all pages when verifying more than one API page; merging pages must preserve all records and their original field values. An unrevealed seed is expected for the current epoch, so records depending on it are reported as pending rather than failed.
+An unrevealed seed is expected for the current epoch, so records depending on it are reported as pending rather than failed.
 
 ## Run it
 
@@ -44,8 +46,8 @@ The command prints a JSON report with the number of verified seed epochs and rou
 
 ## Fixed vector
 
-`tools/fairness-test-vectors.json` contains a fixed known input, expected HMAC-SHA-256 digest, commitment and crash point. Automated tests verify these expected values. A reviewer can use the vector to check that the standalone verifier implements the published formula consistently.
+`tools/fairness-test-vectors.json` holds a fixed input with its expected HMAC-SHA-256 digest, commitment and crash point. The automated tests check these values.
 
 ## What this does not prove
 
-Verification cannot establish that no rounds were omitted from an export, that all users see the same history, or that deployed code remained unchanged. It verifies only the authenticity and arithmetic consistency of the supplied records against the published commitment and algorithm.
+A passing check shows that the records you supply match their commitments and the published formula; it can't show that no round was left out of the export or that the deployed code never changed.

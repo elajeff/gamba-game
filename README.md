@@ -4,19 +4,20 @@
 
 A browser crash game. Hold to start a round, watch the multiplier climb, and release before it crashes. You play with in-game gold (888 to start, plus optional loans); there is no real money involved.
 
-The frontend is plain JavaScript on GitHub Pages. The backend is a Cloudflare Worker with one SQLite-backed Durable Object per player session. The server decides every outcome and payout, and the browser only handles input and display. Once a seed is revealed, each of its rounds can be checked against the commitment published before they started. The backend tests cover duplicate requests, races between cash-out and settlement, and disconnects.
+The frontend is plain JavaScript on GitHub Pages. The backend is a Cloudflare Worker with one SQLite-backed Durable Object per player session. The server decides every outcome and payout, and the browser only handles input and display. Once a seed is revealed, each of its rounds can be checked against the commitment published before they started.
 
 ![A round in progress at x2.26, with personal bests on the left and recent rounds and bank loans on the right](docs/images/round.png)
 
 ## How it works
 
-- **The server owns the game state.** Each session's Durable Object holds the balance, loans and rounds. Wallet changes run in SQLite transactions, every mutating request carries an idempotency key so a retry can't charge twice, and alarms settle a round if the browser disconnects.
-- **Start and release can arrive close together.** A start reservation stops a second round opening while the first is still starting, and a release that arrives during startup is recorded and applied once the round exists.
-- **Cash-outs are capped by the server.** The browser sends the multiplier it showed when you released. The server checks its own clock against the committed crash point first, then pays the lower of the two values. A release that arrives after the crash still loses.
-- **Settlement is pushed over a WebSocket**, with status polling as a fallback when the socket is down.
-- **Outcomes can be checked afterwards.** Each server seed is published as a SHA-256 commitment before use and revealed when it rotates (see below).
+- Each session's Durable Object holds the balance, loans and rounds. Wallet changes run in SQLite transactions, and alarms settle a round if the browser disconnects.
+- Start, release, cash-out, loan, reset and end-game requests carry an idempotency key, so a retry can't charge twice.
+- A start reservation stops a second round opening while the first is still starting. A release that arrives during startup is recorded and applied once the round exists.
+- The browser sends the multiplier it showed when you released. The server checks its own clock against the committed crash point first, then pays the lower of the two values. A release that arrives after the crash still loses.
+- Settlement is pushed over a WebSocket. During a round the browser also polls the round status, once a second while the socket is open and every 250 ms while it is down, and stops while the tab is hidden.
+- Each server seed is published as a SHA-256 commitment before use and revealed when it rotates (see below).
 
-[docs/architecture.md](docs/architecture.md) covers the source layout and the rules the code has to keep.
+[docs/architecture.md](docs/architecture.md) describes what each source file does and the rules the game logic follows.
 
 ## How the crash point is calculated
 
@@ -30,13 +31,13 @@ crashCents = max(100, floor((100 - e) * D / (D - r)))
 crashMultiplier = crashCents / 100
 ```
 
-`e` is the house edge in percentage points (`1` means 1%). The result is rounded down to cents and is never below `1.00×`. Cash-outs are capped at `10×`, and the crash point itself at `1,000,000×`. The same seed, nonce and edge always give the same result.
+`e` is the house edge in percentage points (`1` means 1%). The result is rounded down to cents and is never below `x1.00`. Cash-outs are capped at `x10`, and the crash point itself at `x1,000,000`. The same seed, nonce and edge always give the same result.
 
 Unrevealed seeds are stored encrypted with AES-256-GCM. The crash point is never sent while a round is running.
 
 ## Checking past rounds
 
-Save the `seeds` and `rounds` arrays from the public `/api/fairness` responses to a JSON file, then run:
+Save the `seeds` and `rounds` arrays from your session's `/api/fairness` responses to a JSON file, then run:
 
 ```sh
 node tools/verify-fairness.js fairness-export.json
@@ -54,7 +55,7 @@ py -m http.server 5500
 
 Open `http://localhost:5500` (not a `file://` URL). By default it talks to the deployed Worker set in `backend-config.js`; that URL is public, not a secret.
 
-To run the Worker locally as well, create a `.dev.vars` file with development secrets as shown in [backend/README.md](backend/README.md), then:
+To run the Worker locally as well, create `backend/.dev.vars` with development secrets as shown in [backend/README.md](backend/README.md), then:
 
 ```powershell
 cd backend
@@ -68,10 +69,11 @@ and point `backend-config.js` at `http://localhost:8788` while you test.
 
 ```powershell
 cd backend
+npm.cmd ci
 npm.cmd test
 ```
 
-This runs the backend tests in `backend/test/` and the frontend module tests in `tests/frontend/`. They cover the crash formula, malformed requests, authentication, duplicate and concurrent requests, loans, alarms and reconnect handling. The integration tests start a local Worker with test-only secrets and never touch the deployed one. GitHub Actions runs the same suite on every push and pull request.
+This runs the backend tests in `backend/test/` and the frontend module tests in `tests/frontend/`. They cover the crash formula, malformed requests, authentication, duplicate and concurrent requests, loans, alarms and WebSocket push. The integration tests start a local Worker with test-only secrets and never touch the deployed one. GitHub Actions runs the same suite on every push and pull request.
 
 ## Deploy
 
