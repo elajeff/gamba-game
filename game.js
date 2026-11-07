@@ -927,6 +927,15 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     }
   }
 
+  // A failed cash-out leaves the round running with the hold released. A new press takes
+  // the hold over so its release can retry. Touch gives every press a new pointerId.
+  function retakeReleasedHold(source, identifier) {
+    if (elements.holdButton.classList.contains("is-holding")) return;
+    game.holdSource = source;
+    game.activePointerId = source === "pointer" ? identifier : null;
+    game.keyboardCode = source === "keyboard" ? identifier : null;
+  }
+
   function releaseHold(source, identifier = null) {
     if (game.startPending && game.holdSource === source) {
       if (source === "pointer" && game.activePointerId !== identifier) return;
@@ -1203,7 +1212,10 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
   elements.holdButton.addEventListener("pointerdown", (event) => {
     if (event.pointerType === "mouse" && event.button !== 0) return;
     event.preventDefault();
-    if (game.active) return;
+    if (game.active) {
+      retakeReleasedHold("pointer", event.pointerId);
+      return;
+    }
     void startRound("pointer", event.pointerId);
     if (game.startPending && game.holdSource === "pointer" && elements.holdButton.setPointerCapture) {
       try { elements.holdButton.setPointerCapture(event.pointerId); } catch { /* window release handlers are the fallback */ }
@@ -1216,6 +1228,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
   elements.holdButton.addEventListener("keydown", (event) => {
     if (event.code !== "Space" && event.code !== "Enter") return;
     event.preventDefault();
+    if (!event.repeat && game.active) retakeReleasedHold("keyboard", event.code);
     if (!event.repeat && !game.active && !game.startPending) void startRound("keyboard", event.code);
   });
   window.addEventListener("keyup", (event) => {
