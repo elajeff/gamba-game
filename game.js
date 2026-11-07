@@ -1259,6 +1259,8 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
   elements.verifyFairnessButton.addEventListener("click", () => void verifyRevealedFairness());
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !elements.loanModal.classList.contains("hidden")) closeLoanModal();
+    // A modal can take focus while the hold key is still down, so only a fresh press counts.
+    if (event.repeat && (event.key === "Enter" || event.key === " ") && event.target.closest(".modal-backdrop")) event.preventDefault();
   });
 
   async function boot() {
