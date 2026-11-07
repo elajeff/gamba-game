@@ -63,6 +63,27 @@ test("API client does not retry a request without an idempotency key", async () 
   assert.equal(calls, 1);
 });
 
+test("API client gives up on a request that stalls on the headers or the body", { timeout: 1000 }, async () => {
+  const hangUntilAborted = (signal) => new Promise((_, reject) => {
+    signal.addEventListener("abort", () => reject(signal.reason));
+  });
+  const stalledFetches = [
+    (url, options) => hangUntilAborted(options.signal),
+    async (url, options) => ({ text: () => hangUntilAborted(options.signal) })
+  ];
+
+  for (const fetchImpl of stalledFetches) {
+    const api = createApiClient({
+      baseUrl: "https://example.test",
+      getToken: () => null,
+      timeoutMs: 10,
+      fetchImpl
+    });
+
+    await assert.rejects(api("/api/state"), /took too long/);
+  }
+});
+
 test("API client preserves structured HTTP error details", async () => {
   const api = createApiClient({
     baseUrl: "https://example.test",
