@@ -25,10 +25,6 @@ export class ApiError extends Error {
   }
 }
 
-export function safeParse(text, fallback) {
-  try { return JSON.parse(text); } catch { return fallback; }
-}
-
 export async function readJsonLimited(request, maxBytes = 8192) {
   const declaredLength = Number(request.headers.get("content-length") || 0);
   if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {

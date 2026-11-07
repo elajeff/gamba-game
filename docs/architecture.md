@@ -20,7 +20,7 @@
 - `backend/src/game-rules.js` holds the named game constants and cash-out multiplier validation/calculation.
 - `backend/src/seed-crypto.js` encrypts server seed records at rest and decrypts them only when required by round processing.
 - `backend/src/game-session.js` contains the `GameSession` Durable Object, including SQLite transactions, round lifecycle, alarms and WebSocket settlement events. Transactions stay in the session layer so balance and round changes remain atomic.
-- `backend/src/auth.js` signs and verifies session tokens and keeps the warm verifier-key cache.
+- `backend/src/auth.js` signs and verifies session tokens.
 - `backend/src/crypto-utils.js` contains small shared encoding and Web Crypto helpers.
 - `backend/src/fairness.js` contains the crash-point formula used by the Worker.
 - `backend/src/request-logging.js` emits structured operational error logs without logging request bodies or credentials.

@@ -10,6 +10,10 @@ export function fromBase64(value) {
   return Uint8Array.from(binary, c => c.charCodeAt(0));
 }
 
+export function fromBase64Url(value) {
+  return fromBase64(value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - value.length % 4) % 4));
+}
+
 export function bytesToHex(bytes) {
   return [...new Uint8Array(bytes)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
@@ -25,9 +29,5 @@ export async function sha256Hex(text) {
 
 export async function hmacBytes(secretBytes, message) {
   const key = await crypto.subtle.importKey("raw", secretBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  return new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message)));
-}
-
-export async function hmacBytesWithKey(key, message) {
   return new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message)));
 }

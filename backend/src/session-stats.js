@@ -22,15 +22,8 @@ export function recordSettledRound(sql, round, item) {
       updated_at=excluded.updated_at`,
   wins, losses, pushes, item.stake, item.payout, item.net, scoreMultiplier, item.payout, item.at);
 
-  // Low payouts do not need to trigger writes to the top-five leaderboard.
+  // Busts and zero payouts never reach the leaderboard.
   if (item.result !== "CASHED OUT" || item.payout <= 0) return;
-
-  const count = Number(sql.exec("SELECT COUNT(*) AS count FROM personal_bests").toArray()[0]?.count || 0);
-  const lowest = sql.exec(`SELECT payout,multiplier FROM personal_bests
-    ORDER BY payout ASC,multiplier ASC,created_at DESC LIMIT 1`).toArray()[0];
-  const qualifies = count < 5 || !lowest || item.payout > Number(lowest.payout) ||
-    (item.payout === Number(lowest.payout) && item.multiplier > Number(lowest.multiplier));
-  if (!qualifies) return;
 
   sql.exec(`INSERT OR IGNORE INTO personal_bests
     (round_id,epoch,round_number,stake,payout,multiplier,net,result,created_at)

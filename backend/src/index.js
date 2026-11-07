@@ -4,14 +4,11 @@ import { ApiError, json, readJsonLimited, SECURITY_HEADERS } from "./api-utils.j
 export { GameSession } from "./game-session.js";
 
 function configuredOrigins(env) {
-  // ALLOWED_ORIGIN remains supported for upgrades from the first deployed version.
-  const value = env.ALLOWED_ORIGINS ?? env.ALLOWED_ORIGIN ?? "";
+  const value = env.ALLOWED_ORIGINS ?? "";
   return new Set(String(value).split(",").map(origin => origin.trim()).filter(Boolean));
 }
 
-function corsHeaders(request, env) {
-  const origin = request.headers.get("origin");
-  const allowedOrigins = configuredOrigins(env);
+function corsHeaders(origin) {
   const headers = {
     "access-control-allow-methods": "GET, POST, OPTIONS",
     "access-control-allow-headers": "content-type, authorization, idempotency-key",
@@ -20,7 +17,7 @@ function corsHeaders(request, env) {
   };
 
   // Non-browser clients do not send Origin and do not need CORS headers.
-  if (origin && allowedOrigins.has(origin)) headers["access-control-allow-origin"] = origin;
+  if (origin) headers["access-control-allow-origin"] = origin;
   return headers;
 }
 
@@ -30,10 +27,9 @@ export default {
     // starts can be distinguished from genuinely new starts after a prior response completed.
     const edgeReceivedAt = Date.now();
     const requestId = crypto.randomUUID();
-    const cors = corsHeaders(request, env);
     const origin = request.headers.get("origin");
-    const allowedOrigins = configuredOrigins(env);
-    if (origin && !allowedOrigins.has(origin)) return json({ error: "origin_not_allowed" }, 403, { vary: "Origin" });
+    if (origin && !configuredOrigins(env).has(origin)) return json({ error: "origin_not_allowed" }, 403, { vary: "Origin" });
+    const cors = corsHeaders(origin);
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: { ...SECURITY_HEADERS, ...cors } });
     const url = new URL(request.url);
 
