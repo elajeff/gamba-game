@@ -153,10 +153,7 @@ export class GameSession {
         await readJsonLimited(request), request.headers.get("idempotency-key"),
         request.headers.get("x-gamba-internal-received-at")
       );
-      if (url.pathname === "/api/round/release-intent" && request.method === "POST") {
-        const releaseReceivedAt = Date.now();
-        return await this.releaseIntent(await readJsonLimited(request), request.headers.get("idempotency-key"), releaseReceivedAt);
-      }
+      if (url.pathname === "/api/round/release-intent" && request.method === "POST") return await this.releaseIntent(await readJsonLimited(request), request.headers.get("idempotency-key"));
       if (url.pathname === "/api/round/cashout" && request.method === "POST") return await this.cashOut(await readJsonLimited(request), request.headers.get("idempotency-key"));
       if (url.pathname === "/api/round/status" && request.method === "GET") return await this.roundStatus(url.searchParams.get("id"));
       if (url.pathname === "/api/loan" && request.method === "POST") return await this.takeLoan(await readJsonLimited(request), request.headers.get("idempotency-key"));
@@ -274,8 +271,8 @@ export class GameSession {
     return json({ state: this.publicState(state), commitment, epoch: 1, clientSeedRequired: true, serverTime: Date.now(), profile: readProfileData(this.sql) });
   }
 
-  publicState(state, activeRoundOverride = undefined) {
-    const active = activeRoundOverride === null ? null : this.getActiveRound();
+  publicState(state) {
+    const active = this.getActiveRound();
     return {
       balance: state.balance, roundNumber: state.roundNumber, gameOver: state.gameOver,
       waitingForLoan: state.waitingForLoan, clientSeed: state.clientSeed,
@@ -324,7 +321,7 @@ export class GameSession {
     return json(result);
   }
 
-  async releaseIntent(body, idempotencyKey, releaseReceivedAt = Date.now()) {
+  async releaseIntent(body, idempotencyKey) {
     const state = this.readState();
     if (!state) throw new ApiError(409, "session_not_initialized", "Create a session first.");
     // Prefixing the internal cash-out key must remain inside the common 100-character limit.
@@ -341,28 +338,11 @@ export class GameSession {
 
     const round = this.sql.exec("SELECT id,status FROM rounds WHERE idempotency_key=?", startKey).toArray()[0];
     if (round) {
-      let resultResponse;
-      if (round.status === "running") {
-        const internalCashoutKey = `early_${idempotencyKey}`;
-        const settledResponse = await this.cashOut({
-          roundId: round.id,
-          ...(requestedMultiplierCents === undefined ? {} : { requestedMultiplierCents })
-        }, internalCashoutKey);
-        const settledData = await settledResponse.json();
-        if (settledResponse.ok) {
-          resultResponse = settledData;
-        } else if (settledResponse.status === 409 && settledData?.error === "round_not_running") {
-          // An alarm/status request may have settled the round between our first read and cash-out.
-          const statusResponse = await this.roundStatus(round.id);
-          resultResponse = await statusResponse.json();
-        } else {
-          return json(settledData || { error: "release_not_confirmed" }, settledResponse.status);
-        }
-      } else {
-        const statusResponse = await this.roundStatus(round.id);
-        resultResponse = await statusResponse.json();
-      }
-      return this.storeReleaseIntentResponse(idempotencyKey, { ...resultResponse, releaseMode: "settled" });
+      const settledResponse = round.status === "running"
+        ? await this.cashOut({ roundId: round.id, requestedMultiplierCents }, `early_${idempotencyKey}`)
+        : await this.roundStatus(round.id);
+      const settledData = await settledResponse.json();
+      return this.storeReleaseIntentResponse(idempotencyKey, { ...settledData, releaseMode: "settled" });
     }
 
     if (state.gameOver || state.waitingForLoan || state.balance <= 0 || !state.clientSeed) {
@@ -375,24 +355,17 @@ export class GameSession {
 
     const now = Date.now();
     const queued = { releaseMode: "queued", startKey };
-    let resultResponse = queued;
     this.ctx.storage.transactionSync(() => {
-      const alreadyCached = this.cachedIdempotent(idempotencyKey, "round-release-intent");
-      if (alreadyCached) {
-        resultResponse = alreadyCached;
-        return;
-      }
       // Stale entries can only result from a start request that failed before creating a round.
       this.cleanupExpiredRecords(now);
       const previousIntent = this.sql.exec("SELECT start_key FROM early_release_intents WHERE start_key=?", startKey).toArray()[0];
       if (!previousIntent) {
         this.sql.exec("INSERT INTO early_release_intents(start_key,release_key,released_at,created_at) VALUES(?,?,?,?)",
-          startKey, idempotencyKey, releaseReceivedAt, now);
+          startKey, idempotencyKey, now, now);
       }
       this.storeIdempotent(idempotencyKey, "round-release-intent", queued);
-      resultResponse = queued;
     });
-    return json(resultResponse);
+    return json(queued);
   }
 
   reserveStartSlot(idempotencyKey, requestReceivedAt) {
@@ -442,10 +415,7 @@ export class GameSession {
   }
 
   async startRound(body, idempotencyKey, receivedAtHeader = null) {
-    // Let the core perform the standard key validation for malformed requests.
-    if (!idempotencyKey || !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
-      return this.startRoundCore(body, idempotencyKey);
-    }
+    requireIdempotencyKey(idempotencyKey);
     const cached = this.cachedIdempotent(idempotencyKey, "round-start");
     if (cached) return this.replayRoundStart(cached);
     const existing = this.sql.exec("SELECT response_json FROM rounds WHERE idempotency_key=?", idempotencyKey).toArray()[0];
@@ -487,14 +457,9 @@ export class GameSession {
   async startRoundCore(body, idempotencyKey) {
     const state = this.readState();
     if (!state) throw new ApiError(409, "session_not_initialized", "Create a session first.");
-    requireIdempotencyKey(idempotencyKey);
     // Bound orphaned intents from starts that failed before creating a round, but preserve
     // an intent associated with this same in-flight idempotency key.
     this.cleanupExpiredRecords();
-    const cached = this.cachedIdempotent(idempotencyKey, "round-start");
-    if (cached) return this.replayRoundStart(cached);
-    const existing = this.sql.exec("SELECT response_json FROM rounds WHERE idempotency_key=?", idempotencyKey).toArray()[0];
-    if (existing?.response_json) return this.replayRoundStart(safeParse(existing.response_json, { error: "idempotency_replay" }));
     if (state.gameOver) throw new ApiError(409, "game_over", "Start a new game before playing again.");
     if (state.waitingForLoan) throw new ApiError(409, "loan_decision_required", "Take a loan or end the game before starting another round.");
     if (!state.clientSeed) throw new ApiError(409, "client_seed_required", "Set a client seed before starting a round.");
@@ -547,29 +512,13 @@ export class GameSession {
         // The release reached the server before this round was committed. Its only fair
         // interpretation is cash-out at the start boundary (x1.00), still subject to bust-at-x1.
         const bustedAtStart = 1 >= crashPoint;
-        const settled = this.settleRound(
-          roundRecord, latest, bustedAtStart ? "BUSTED" : "CASHED OUT",
-          bustedAtStart ? crashPoint : 1, bustedAtStart ? 0 : stake, startedAt
+        const multiplier = bustedAtStart ? crashPoint : 1;
+        const settlement = this.writeSettlement(
+          roundRecord, latest, bustedAtStart ? "busted" : "cashed_out",
+          multiplier, bustedAtStart ? 0 : stake, startedAt
         );
-        this.sql.exec("UPDATE rounds SET status=?,payout=?,cashed_out_at=? WHERE id=? AND status='running'",
-          bustedAtStart ? "busted" : "cashed_out", bustedAtStart ? 0 : stake, startedAt, roundId);
-        this.writeState(settled.state);
-        recordSettledRound(this.sql, roundRecord, settled.historyItem);
         this.sql.exec("DELETE FROM early_release_intents WHERE start_key=?", idempotencyKey);
-        response = {
-          round: roundPayload,
-          result: bustedAtStart ? "busted" : "cashed_out",
-          roundId,
-          ...(bustedAtStart ? { crashPoint } : {}),
-          multiplier: bustedAtStart ? crashPoint : 1,
-          payout: bustedAtStart ? 0 : stake,
-          net: settled.historyItem.net,
-          state: this.publicState(settled.state, null),
-          historyItem: settled.historyItem,
-          repayments: settled.repayments,
-          defaultedLoan: settled.defaultedLoan,
-          profile: readProfileData(this.sql)
-        };
+        response = { round: roundPayload, ...settlement, multiplier };
       } else {
         response = { round: roundPayload, state: { balance: latest.balance, roundNumber: latest.roundNumber } };
       }
@@ -589,10 +538,7 @@ export class GameSession {
     } else {
       this.broadcastRoundSettled(response, roundId, idempotencyKey);
     }
-    const serverTime = Date.now();
-    return json(response.result
-      ? { ...response, serverTime }
-      : { ...response, crashPoint: undefined, serverTime });
+    return json({ ...response, serverTime: Date.now() });
   }
 
   settleRound(round, state, result, multiplier, payout, now) {
@@ -622,6 +568,39 @@ export class GameSession {
     return { state, historyItem, repayments, defaultedLoan: expired || null };
   }
 
+  // Must run inside a transaction. The early release in startRoundCore calls this
+  // directly because it is already in one; everything else uses commitSettlement.
+  writeSettlement(round, state, status, multiplier, payout, now) {
+    const settled = this.settleRound(round, state, status === "busted" ? "BUSTED" : "CASHED OUT", multiplier, payout, now);
+    this.sql.exec("UPDATE rounds SET status=?,payout=?,cashed_out_at=? WHERE id=? AND status='running'",
+      status, payout, now, round.id);
+    this.writeState(settled.state);
+    recordSettledRound(this.sql, round, settled.historyItem);
+    return {
+      result: status,
+      roundId: round.id,
+      ...(status === "busted" ? { crashPoint: round.crash_point } : { multiplier }),
+      payout,
+      net: settled.historyItem.net,
+      state: this.publicState(settled.state),
+      historyItem: settled.historyItem,
+      repayments: settled.repayments,
+      defaultedLoan: settled.defaultedLoan,
+      profile: readProfileData(this.sql)
+    };
+  }
+
+  commitSettlement(round, state, status, multiplier, payout, now, idempotencyKey = null) {
+    let response;
+    this.ctx.storage.transactionSync(() => {
+      response = this.writeSettlement(round, state, status, multiplier, payout, now);
+      if (idempotencyKey) this.storeIdempotent(idempotencyKey, "cashout", response);
+    });
+    this.broadcastRoundSettled(response, round.id, round.idempotency_key);
+    this.deferSettlementAlarmCleanup(round.id);
+    return response;
+  }
+
   async cashOut(body, idempotencyKey) {
     const state = this.readState();
     if (!state) throw new ApiError(409, "session_not_initialized", "Create a session first.");
@@ -638,87 +617,22 @@ export class GameSession {
     const elapsedSeconds = Math.max(0, (now - round.started_at) / 1000);
     const liveMultiplier = Math.min(MAX_MULTIPLIER, 1 + elapsedSeconds * GROWTH_PER_SECOND);
     if (liveMultiplier >= round.crash_point) return await this.settleBust(round, state, now, idempotencyKey);
-    if (liveMultiplier >= MAX_MULTIPLIER) return json(await this.settleAtCap(round, state, now, idempotencyKey, requestedMultiplierCents));
     // Never award more than either the visible release value or server time allows.
     // A delayed network request can reduce latency-induced display jumps, but cannot
     // make a late cash-out win after the server has reached the committed crash point.
     const multiplierCents = resolveCashoutMultiplierCents(liveMultiplier, requestedMultiplierCents);
     const multiplier = multiplierCents / 100;
     const payout = calculatePayout(round.stake, multiplierCents);
-    const settled = this.settleRound(round, state, "CASHED OUT", multiplier, payout, now);
-    let response;
-    this.ctx.storage.transactionSync(() => {
-      this.sql.exec("UPDATE rounds SET status='cashed_out', payout=?, cashed_out_at=? WHERE id=? AND status='running'", payout, now, roundId);
-      this.writeState(settled.state);
-      recordSettledRound(this.sql, round, settled.historyItem);
-      response = { result: "cashed_out", roundId, multiplier, payout, net: settled.historyItem.net,
-        state: this.publicState(settled.state, null), historyItem: settled.historyItem,
-        repayments: settled.repayments, defaultedLoan: settled.defaultedLoan, profile: readProfileData(this.sql) };
-      this.storeIdempotent(idempotencyKey, "cashout", response);
-    });
-    this.broadcastRoundSettled(response, roundId, round.idempotency_key);
-    this.deferSettlementAlarmCleanup(roundId);
-    return json(response);
+    return json(this.commitSettlement(round, state, "cashed_out", multiplier, payout, now, idempotencyKey));
   }
 
   async settleBust(round, state, now, idempotencyKey = null) {
-    // Re-read the row immediately before settlement so a late alarm/status/cash-out cannot settle twice.
-    const latest = this.sql.exec("SELECT * FROM rounds WHERE id=?", round.id).toArray()[0];
-    if (!latest || latest.status !== "running") {
-      const currentState = this.readState();
-      const historyItem = currentState?.history?.find((item) => item.roundId === round.id) || null;
-      return json({ status: latest?.status || "not_found", result: latest?.status || "not_found", roundId: round.id,
-        payout: latest?.payout ?? 0, historyItem, state: this.publicState(currentState), profile: readProfileData(this.sql) });
-    }
-    round = latest;
-    const currentState = this.readState() || state;
-    const settled = this.settleRound(round, currentState, "BUSTED", round.crash_point, 0, now);
-    let response;
-    this.ctx.storage.transactionSync(() => {
-      this.sql.exec("UPDATE rounds SET status='busted', payout=0, cashed_out_at=? WHERE id=? AND status='running'", now, round.id);
-      this.writeState(settled.state);
-      recordSettledRound(this.sql, round, settled.historyItem);
-      response = { result: "busted", roundId: round.id, crashPoint: round.crash_point, payout: 0,
-        net: settled.historyItem.net, state: this.publicState(settled.state, null),
-        historyItem: settled.historyItem, repayments: settled.repayments,
-        defaultedLoan: settled.defaultedLoan, profile: readProfileData(this.sql) };
-      if (idempotencyKey) this.storeIdempotent(idempotencyKey, "cashout", response);
-    });
-    this.broadcastRoundSettled(response, round.id, round.idempotency_key);
-    this.deferSettlementAlarmCleanup(round.id);
-    return json(response);
+    return json(this.commitSettlement(round, state, "busted", round.crash_point, 0, now, idempotencyKey));
   }
 
-  async settleAtCap(round, state, now, idempotencyKey = null, requestedMultiplierCents = undefined) {
-    const latest = this.sql.exec("SELECT * FROM rounds WHERE id=?", round.id).toArray()[0];
-    if (!latest || latest.status !== "running") {
-      const currentState = this.readState();
-      const historyItem = currentState?.history?.find((item) => item.roundId === round.id) || null;
-      return { result: latest?.status || "not_found", roundId: round.id, payout: latest?.payout ?? 0,
-        historyItem, state: this.publicState(currentState), profile: readProfileData(this.sql) };
-    }
-    round = latest;
-    const currentState = this.readState() || state;
-    // An in-flight release that reaches the server at the x10 boundary still respects
-    // the visible release cap. Automatic alarm settlement remains exactly x10.
-    const multiplierCents = resolveCashoutMultiplierCents(MAX_MULTIPLIER, requestedMultiplierCents);
-    const payoutMultiplier = multiplierCents / 100;
-    const payout = calculatePayout(round.stake, multiplierCents);
-    const settled = this.settleRound(round, currentState, "CASHED OUT", payoutMultiplier, payout, now);
-    let response;
-    this.ctx.storage.transactionSync(() => {
-      this.sql.exec("UPDATE rounds SET status='cashed_out', payout=?, cashed_out_at=? WHERE id=? AND status='running'", payout, now, round.id);
-      this.writeState(settled.state);
-      recordSettledRound(this.sql, round, settled.historyItem);
-      response = { result: "cashed_out", roundId: round.id, multiplier: payoutMultiplier, payout,
-        net: settled.historyItem.net, state: this.publicState(settled.state, null),
-        historyItem: settled.historyItem, repayments: settled.repayments,
-        defaultedLoan: settled.defaultedLoan, profile: readProfileData(this.sql) };
-      if (idempotencyKey) this.storeIdempotent(idempotencyKey, "cashout", response);
-    });
-    this.broadcastRoundSettled(response, round.id, round.idempotency_key);
-    this.deferSettlementAlarmCleanup(round.id);
-    return response;
+  async settleAtCap(round, state, now) {
+    // Alarm and status settlement has no client ceiling, so it pays exactly x10.
+    return this.commitSettlement(round, state, "cashed_out", MAX_MULTIPLIER, calculatePayout(round.stake, MAX_MULTIPLIER * 100), now);
   }
 
   async roundStatus(id) {
@@ -730,7 +644,7 @@ export class GameSession {
       const serverTime = Date.now();
       const elapsed = Math.max(0, (serverTime - round.started_at) / 1000);
       const liveMultiplier = Math.min(MAX_MULTIPLIER, 1 + elapsed * GROWTH_PER_SECOND);
-      if (liveMultiplier >= round.crash_point) return await this.settleBust(round, state, Date.now(), null);
+      if (liveMultiplier >= round.crash_point) return await this.settleBust(round, state, Date.now());
       if (liveMultiplier >= MAX_MULTIPLIER) return json({ status: "cashed_out", ...await this.settleAtCap(round, state, Date.now()) });
       return json({ status: "running", round: { id: round.id, startedAt: round.started_at, stake: round.stake }, multiplier: Math.floor(liveMultiplier * 100) / 100, serverTime });
     }
