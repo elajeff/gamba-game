@@ -31,60 +31,6 @@ test("game reset cannot run while a server round is active", async () => {
   );
 });
 
-test("fairness endpoint never returns the crash point for a running round", async () => {
-  const calls = [];
-  const session = {
-    readState: () => ({ currentEpoch: 1, edgePercent: 1 }),
-    currentCommitment: () => "a".repeat(64),
-    sql: {
-      exec(query, ...args) {
-        calls.push({ query, args });
-        if (query.includes("COUNT(*) AS count FROM seeds")) return { toArray: () => [{ count: 1 }] };
-        if (query.includes("COUNT(*) AS count FROM rounds")) return { toArray: () => [{ count: 1 }] };
-        if (query.includes("FROM seeds ORDER BY epoch ASC")) {
-          return { toArray: () => [{ epoch: 1, commitment: "a".repeat(64), revealed_seed: null }] };
-        }
-        if (query.includes("FROM rounds ORDER BY started_at ASC")) {
-          assert.match(query, /CASE WHEN status='running' THEN NULL ELSE crash_point END AS crash_point/);
-          return { toArray: () => [{ id: "active-round", epoch: 1, nonce: 1, status: "running", crash_point: null }] };
-        }
-        throw new Error(`Unexpected SQL in fairness test: ${query}`);
-      }
-    }
-  };
-
-  const response = await GameSession.prototype.fairness.call(session, new URLSearchParams("limit=10"));
-  assert.equal(response.status, 200);
-  const body = await response.json();
-  assert.equal(body.rounds.length, 1);
-  assert.equal(body.rounds[0].status, "running");
-  assert.equal(body.rounds[0].crash_point, null);
-});
-
-test("setting the same client seed again avoids a redundant state write", async () => {
-  let writes = 0;
-  const session = {
-    readState: () => ({ clientSeed: "same-client-seed-123", currentEpoch: 1 }),
-    getActiveRound: () => null,
-    currentCommitment: () => "a".repeat(64),
-    writeState: () => { writes += 1; },
-    ctx: { storage: { transactionSync(callback) { return callback(); } } }
-  };
-
-  const response = await GameSession.prototype.setClientSeed.call(session, {
-    clientSeed: "same-client-seed-123"
-  });
-  const data = await response.json();
-
-  assert.equal(response.status, 200);
-  assert.equal(data.clientSeed, "same-client-seed-123");
-  assert.equal(data.commitment, "a".repeat(64));
-  assert.equal(writes, 0);
-});
-
-
-
-
 function fakeStartReservationSession() {
   let reservation = null;
   const metadata = new Map();

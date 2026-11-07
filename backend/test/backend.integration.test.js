@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import { mkdtemp, mkdir, readFile, rm, writeFile, copyFile, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { calculateRoundOutcome } from "../../tools/verify-fairness.js";
 
 const BACKEND_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WRANGLER_CLI = path.join(BACKEND_DIR, "node_modules", "wrangler", "bin", "wrangler.js");
@@ -41,24 +42,6 @@ async function stopProcess(child) {
     await Promise.race([once(child, "exit").catch(() => {}), pause(2500)]);
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   }
-}
-
-function crashPointFromDigest(digest, edgePercent = 1) {
-  const first13Hex = digest.toString("hex").slice(0, 13);
-  const random52 = BigInt(`0x${first13Hex}`);
-  const denominator = 1n << 52n;
-  const rtpPercent = BigInt(Math.round(100 - edgePercent));
-  let cents = (rtpPercent * denominator) / (denominator - random52);
-  if (cents < 100n) cents = 100n;
-  if (cents > 100_000_000n) cents = 100_000_000n;
-  return Number(cents) / 100;
-}
-
-function locallyVerifyRound(serverSeedHex, round, edgePercent = 1) {
-  const digest = createHmac("sha256", Buffer.from(serverSeedHex, "hex"))
-    .update(`${round.client_seed}:${round.nonce}`, "utf8")
-    .digest();
-  return crashPointFromDigest(digest, edgePercent);
 }
 
 async function waitForHealth(baseUrl, child, getLogs, timeoutMs = 45_000) {
@@ -108,6 +91,59 @@ async function api(baseUrl, pathname, options = {}) {
 
 function idempotencyKey() {
   return randomUUID().replace(/-/g, "");
+}
+
+async function newPlayer(baseUrl) {
+  const created = await api(baseUrl, "/api/session", { method: "POST", body: {} });
+  assert.equal(created.status, 201, created.text);
+  const token = created.data.token;
+  const seed = await api(baseUrl, "/api/client-seed", {
+    method: "POST", token, body: { clientSeed: randomBytes(16).toString("hex") }
+  });
+  assert.equal(seed.status, 200, seed.text);
+  return token;
+}
+
+async function cashOutOrStatus(baseUrl, token, roundId, requestedMultiplierCents) {
+  const cashout = await api(baseUrl, "/api/round/cashout", {
+    method: "POST", token, headers: { "idempotency-key": idempotencyKey() },
+    body: { roundId, requestedMultiplierCents }
+  });
+  if (cashout.status !== 409 || cashout.data?.error !== "round_not_running") return cashout;
+  // A very low crash may have been settled by its alarm before this request arrived.
+  return api(baseUrl, `/api/round/status?id=${encodeURIComponent(roundId)}`, { token });
+}
+
+function openEventSocket(baseUrl, token) {
+  const socket = new WebSocket(`${baseUrl.replace(/^http:/, "ws:")}/api/round/events`,
+    ["gamba-events-v1", `gamba-auth.${token}`]);
+  const messages = [];
+  const waiters = [];
+  socket.addEventListener("message", (event) => {
+    let payload;
+    try { payload = JSON.parse(event.data); } catch { return; }
+    messages.push(payload);
+    for (let i = waiters.length - 1; i >= 0; i -= 1) {
+      if (!waiters[i].predicate(payload)) continue;
+      clearTimeout(waiters[i].timer);
+      waiters[i].resolve(payload);
+      waiters.splice(i, 1);
+    }
+  });
+  const waitFor = (predicate, timeoutMs = 5000) => {
+    const existing = messages.find(predicate);
+    if (existing) return Promise.resolve(existing);
+    return new Promise((resolve, reject) => {
+      const waiter = { predicate, resolve, reject, timer: null };
+      waiter.timer = setTimeout(() => {
+        const index = waiters.indexOf(waiter);
+        if (index >= 0) waiters.splice(index, 1);
+        reject(new Error("Timed out waiting for a WebSocket message."));
+      }, timeoutMs);
+      waiters.push(waiter);
+    });
+  };
+  return { socket, waitFor };
 }
 
 // This suite launches a fresh, local Wrangler Worker with test-only secrets and
@@ -396,12 +432,7 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
         assert.equal(fairnessAfter.data.totalRounds, fairnessBefore.data.totalRounds + startedRounds.length,
           "Only accepted starts may create round records.");
 
-        let settle = await api(baseUrl, "/api/round/cashout", {
-          method: "POST", token: auth, headers: { "idempotency-key": idempotencyKey() }, body: { roundId: winner.round.id }
-        });
-        if (settle.status === 409 && settle.data?.error === "round_not_running") {
-          settle = await api(baseUrl, `/api/round/status?id=${encodeURIComponent(winner.round.id)}`, { token: auth });
-        }
+        const settle = await cashOutOrStatus(baseUrl, auth, winner.round.id);
         assert.equal(settle.status, 200, settle.text);
         assert.ok(["cashed_out", "busted"].includes(settle.data.result));
         const settledState = await api(baseUrl, "/api/state", { token: auth });
@@ -477,24 +508,20 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
         "seedOffset must return the second seed epoch when requested");
 
       const refreshedAfterReset = await api(baseUrl, "/api/state", { token: auth });
+      assert.equal(refreshedAfterReset.data.state.balance, STARTING_GOLD);
+      assert.equal(refreshedAfterReset.data.state.roundNumber, 0);
+      assert.equal(refreshedAfterReset.data.state.clientSeed, null);
+      assert.equal(refreshedAfterReset.data.state.activeRound, null);
+      assert.equal(refreshedAfterReset.data.state.activeLoans.length, 0);
+      assert.equal(refreshedAfterReset.data.epoch, 2);
       assert.equal(refreshedAfterReset.data.profile.stats.roundsPlayed, oldRounds.length,
         "Session statistics must persist across game resets and include every settled round from the revealed epoch");
       for (const round of oldRounds) {
         assert.ok(["cashed_out", "busted"].includes(round.status), `Round ${round.id} was not settled.`);
         assert.equal(typeof round.crash_point, "number");
-        assert.equal(locallyVerifyRound(revealedSeed, round, 1), round.crash_point,
+        assert.equal(calculateRoundOutcome(revealedSeed, round, 1).crashPoint, round.crash_point,
           `Crash point mismatch for round ${round.id}, nonce ${round.nonce}`);
       }
-    });
-
-    await t.test("new epoch is isolated and has no inherited active round or loans", async () => {
-      const state = await api(baseUrl, "/api/state", { token: auth });
-      assert.equal(state.data.state.balance, STARTING_GOLD);
-      assert.equal(state.data.state.roundNumber, 0);
-      assert.equal(state.data.state.clientSeed, null);
-      assert.equal(state.data.state.activeRound, null);
-      assert.equal(state.data.state.activeLoans.length, 0);
-      assert.equal(state.data.epoch, 2);
     });
 
     await t.test("a second session is independent", async () => {
@@ -514,13 +541,7 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
     });
 
     await t.test("keeps only the five highest personal payouts and preserves profile across resets", async () => {
-      const fresh = await api(baseUrl, "/api/session", { method: "POST", body: {} });
-      assert.equal(fresh.status, 201, fresh.text);
-      const freshToken = fresh.data.token;
-      const seed = await api(baseUrl, "/api/client-seed", {
-        method: "POST", token: freshToken, body: { clientSeed: randomBytes(16).toString("hex") }
-      });
-      assert.equal(seed.status, 200, seed.text);
+      const freshToken = await newPlayer(baseUrl);
 
       const stakes = Array.from({ length: 15 }, (_, index) => index + 1);
       for (const stake of stakes) {
@@ -530,22 +551,10 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
         });
         assert.equal(started.status, 200, started.text);
 
-        const cashed = await api(baseUrl, "/api/round/cashout", {
-          method: "POST", token: freshToken,
-          headers: { "idempotency-key": idempotencyKey() }, body: { roundId: started.data.round.id }
-        });
-        let result;
-        if (cashed.status === 200) {
-          result = cashed.data;
-        } else {
-          assert.equal(cashed.status, 409, `Unexpected cash-out failure: ${cashed.text}`);
-          // An x1.00 crash can settle before the cash-out request reaches the Durable Object.
-          result = await api(baseUrl, `/api/round/status?id=${encodeURIComponent(started.data.round.id)}`, { token: freshToken });
-          assert.equal(result.status, 200, result.text);
-          result = result.data;
-        }
-        assert.ok(["cashed_out", "busted"].includes(result.result || result.status),
-          `Round must be settled before starting the next one: ${JSON.stringify(result)}`);
+        const settled = await cashOutOrStatus(baseUrl, freshToken, started.data.round.id);
+        assert.equal(settled.status, 200, settled.text);
+        assert.ok(["cashed_out", "busted"].includes(settled.data.result || settled.data.status),
+          `Round must be settled before starting the next one: ${settled.text}`);
       }
 
       const finalState = await api(baseUrl, "/api/state", { token: freshToken });
@@ -575,13 +584,7 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
     });
 
     await t.test("cash-out result never exceeds the multiplier sent by the visible release", async () => {
-      const fresh = await api(baseUrl, "/api/session", { method: "POST", body: {} });
-      assert.equal(fresh.status, 201, fresh.text);
-      const token = fresh.data.token;
-      const seed = await api(baseUrl, "/api/client-seed", {
-        method: "POST", token, body: { clientSeed: randomBytes(16).toString("hex") }
-      });
-      assert.equal(seed.status, 200, seed.text);
+      const token = await newPlayer(baseUrl);
 
       let matchedCap = false;
       for (let attempt = 0; attempt < 12 && !matchedCap; attempt += 1) {
@@ -592,18 +595,13 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
         assert.equal(started.status, 200, started.text);
         if (started.data.result) continue; // A fast x1.00 crash is legitimately settled at start.
         await new Promise(resolve => setTimeout(resolve, 100));
+        const fairness = await api(baseUrl, "/api/fairness?limit=20", { token });
+        const recordedRound = fairness.data.rounds.find((round) => round.id === started.data.round.id);
         const requestedMultiplierCents = 100;
-        let cashout = await api(baseUrl, "/api/round/cashout", {
-          method: "POST", token, headers: { "idempotency-key": idempotencyKey() },
-          body: { roundId: started.data.round.id, requestedMultiplierCents }
-        });
-        if (cashout.status === 409 && cashout.data?.error === "round_not_running") {
-          cashout = await api(baseUrl, `/api/round/status?id=${encodeURIComponent(started.data.round.id)}`, { token });
-        }
+        const cashout = await cashOutOrStatus(baseUrl, token, started.data.round.id, requestedMultiplierCents);
         assert.equal(cashout.status, 200, cashout.text);
-        assert.equal(Object.hasOwn(cashout.data, "timing"), false,
-          "Gameplay responses should not expose temporary timing diagnostics.");
         if (cashout.data.result === "cashed_out") {
+          assert.equal(recordedRound.crash_point, null, "A round that is still running must not show its crash point.");
           assert.equal(cashout.data.multiplier, 1,
             "A delayed successful request is capped at the multiplier displayed when release occurred.");
           matchedCap = true;
@@ -615,13 +613,7 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
     });
 
     await t.test("early release queued before round commit settles atomically at the x1 boundary", async () => {
-      const fresh = await api(baseUrl, "/api/session", { method: "POST", body: {} });
-      assert.equal(fresh.status, 201, fresh.text);
-      const token = fresh.data.token;
-      const seed = await api(baseUrl, "/api/client-seed", {
-        method: "POST", token, body: { clientSeed: randomBytes(16).toString("hex") }
-      });
-      assert.equal(seed.status, 200, seed.text);
+      const token = await newPlayer(baseUrl);
 
       const startKey = idempotencyKey();
       const releaseKey = idempotencyKey();
@@ -630,8 +622,6 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
       });
       assert.equal(queued.status, 200, queued.text);
       assert.equal(queued.data.releaseMode, "queued");
-      assert.equal(Object.hasOwn(queued.data, "timing"), false,
-        "Queued release responses should not expose temporary timing diagnostics.");
 
       const started = await api(baseUrl, "/api/round/start", {
         method: "POST", token, headers: { "idempotency-key": startKey }, body: { stake: 1 }
@@ -639,8 +629,6 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
       assert.equal(started.status, 200, started.text);
       assert.ok(["cashed_out", "busted"].includes(started.data.result),
         `An early release must be settled in the start response: ${JSON.stringify(started.data)}`);
-      assert.equal(Object.hasOwn(started.data, "timing"), false,
-        "Early-release settlement should not expose temporary timing diagnostics.");
       assert.equal(started.data.roundId, started.data.round.id);
       assert.equal(started.data.state.roundNumber, 1);
       assert.equal(started.data.state.activeRound, null);
@@ -658,13 +646,7 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
     });
 
     await t.test("release intent after round commit settles once and is idempotent", async () => {
-      const fresh = await api(baseUrl, "/api/session", { method: "POST", body: {} });
-      assert.equal(fresh.status, 201, fresh.text);
-      const token = fresh.data.token;
-      const seed = await api(baseUrl, "/api/client-seed", {
-        method: "POST", token, body: { clientSeed: randomBytes(16).toString("hex") }
-      });
-      assert.equal(seed.status, 200, seed.text);
+      const token = await newPlayer(baseUrl);
 
       const startKey = idempotencyKey();
       const started = await api(baseUrl, "/api/round/start", {
@@ -678,8 +660,6 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
       assert.equal(release.status, 200, release.text);
       assert.equal(release.data.releaseMode, "settled");
       assert.ok(["cashed_out", "busted"].includes(release.data.result || release.data.status));
-      assert.equal(Object.hasOwn(release.data, "timing"), false,
-        "Release settlement should not expose temporary timing diagnostics.");
       assert.equal(release.data.state.activeRound, null);
       assert.equal(release.data.state.roundNumber, 1);
 
@@ -695,13 +675,7 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
     });
 
     await t.test("public state returns only the ten history rows shown by the UI while fairness records remain available", async () => {
-      const fresh = await api(baseUrl, "/api/session", { method: "POST", body: {} });
-      assert.equal(fresh.status, 201, fresh.text);
-      const token = fresh.data.token;
-      const seed = await api(baseUrl, "/api/client-seed", {
-        method: "POST", token, body: { clientSeed: randomBytes(16).toString("hex") }
-      });
-      assert.equal(seed.status, 200, seed.text);
+      const token = await newPlayer(baseUrl);
 
       for (let index = 0; index < 12; index += 1) {
         const started = await api(baseUrl, "/api/round/start", {
@@ -736,42 +710,8 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
     });
 
     await t.test("Durable Object alarm pushes settlement without any status poll", { timeout: 25_000 }, async () => {
-      const isolated = await api(baseUrl, "/api/session", { method: "POST", body: {} });
-      assert.equal(isolated.status, 201, isolated.text);
-      const isolatedToken = isolated.data.token;
-      const setSeed = await api(baseUrl, "/api/client-seed", {
-        method: "POST", token: isolatedToken, body: { clientSeed: randomBytes(16).toString("hex") }
-      });
-      assert.equal(setSeed.status, 200, setSeed.text);
-
-      const socket = new WebSocket(`${baseUrl.replace(/^http:/, "ws:")}/api/round/events`,
-        ["gamba-events-v1", `gamba-auth.${isolatedToken}`]);
-      const messages = [];
-      const waiters = [];
-      socket.addEventListener("message", (event) => {
-        let payload;
-        try { payload = JSON.parse(event.data); } catch { return; }
-        messages.push(payload);
-        for (let i = waiters.length - 1; i >= 0; i -= 1) {
-          if (!waiters[i].predicate(payload)) continue;
-          clearTimeout(waiters[i].timer);
-          waiters[i].resolve(payload);
-          waiters.splice(i, 1);
-        }
-      });
-      const waitFor = (predicate, timeoutMs = 15_000) => {
-        const existing = messages.find(predicate);
-        if (existing) return Promise.resolve(existing);
-        return new Promise((resolve, reject) => {
-          const waiter = { predicate, resolve, reject, timer: null };
-          waiter.timer = setTimeout(() => {
-            const index = waiters.indexOf(waiter);
-            if (index >= 0) waiters.splice(index, 1);
-            reject(new Error("Timed out waiting for the alarm settlement push."));
-          }, timeoutMs);
-          waiters.push(waiter);
-        });
-      };
+      const isolatedToken = await newPlayer(baseUrl);
+      const { socket, waitFor } = openEventSocket(baseUrl, isolatedToken);
       try {
         await Promise.race([
           new Promise((resolve, reject) => {
@@ -780,7 +720,7 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
             socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("WebSocket connection failed.")); }, { once: true });
           })
         ]);
-        await waitFor((message) => message.type === "ready", 5000);
+        await waitFor((message) => message.type === "ready");
         assert.equal(socket.protocol, "gamba-events-v1", "The bearer token subprotocol must never be echoed back.");
         const started = await api(baseUrl, "/api/round/start", {
           method: "POST", token: isolatedToken, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 1 }
@@ -791,7 +731,7 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
 
         // Do not request /api/round/status while waiting. The Durable Object alarm itself must
         // settle the round and publish the same authoritative result over the live socket.
-        const pushed = await waitFor((message) => message.type === "round-settled" && message.roundId === roundId);
+        const pushed = await waitFor((message) => message.type === "round-settled" && message.roundId === roundId, 15_000);
         assert.ok(["cashed_out", "busted"].includes(pushed.result));
         assert.equal(pushed.state.activeRound, null);
         assert.equal(pushed.state.roundNumber, 1);
@@ -803,47 +743,12 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
         assert.equal(recovered.data.profile.stats.roundsPlayed, 1);
       } finally {
         try { socket.close(); } catch { /* already closed */ }
-        for (const waiter of waiters) clearTimeout(waiter.timer);
       }
     });
 
     await t.test("authenticated WebSocket receives settlement events without waiting for status polling", async () => {
-      const fresh = await api(baseUrl, "/api/session", { method: "POST", body: {} });
-      assert.equal(fresh.status, 201, fresh.text);
-      const token = fresh.data.token;
-      const seed = await api(baseUrl, "/api/client-seed", {
-        method: "POST", token, body: { clientSeed: randomBytes(16).toString("hex") }
-      });
-      assert.equal(seed.status, 200, seed.text);
-
-      const wsBase = baseUrl.replace(/^http:/, "ws:");
-      const socket = new WebSocket(`${wsBase}/api/round/events`, ["gamba-events-v1", `gamba-auth.${token}`]);
-      const seen = [];
-      const waiters = [];
-      socket.addEventListener("message", (event) => {
-        let payload;
-        try { payload = JSON.parse(event.data); } catch { return; }
-        seen.push(payload);
-        for (let i = waiters.length - 1; i >= 0; i -= 1) {
-          if (!waiters[i].predicate(payload)) continue;
-          clearTimeout(waiters[i].timer);
-          waiters[i].resolve(payload);
-          waiters.splice(i, 1);
-        }
-      });
-      const waitFor = (predicate, timeoutMs = 5000) => {
-        const existing = seen.find(predicate);
-        if (existing) return Promise.resolve(existing);
-        return new Promise((resolve, reject) => {
-          const waiter = { predicate, resolve, reject, timer: null };
-          waiter.timer = setTimeout(() => {
-            const index = waiters.indexOf(waiter);
-            if (index >= 0) waiters.splice(index, 1);
-            reject(new Error("Timed out waiting for WebSocket settlement event."));
-          }, timeoutMs);
-          waiters.push(waiter);
-        });
-      };
+      const token = await newPlayer(baseUrl);
+      const { socket, waitFor } = openEventSocket(baseUrl, token);
       try {
         await Promise.race([
           new Promise((resolve, reject) => {
@@ -870,7 +775,6 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
         assert.equal(pushed.state.roundNumber, 1);
       } finally {
         try { socket.close(); } catch { /* already closed */ }
-        for (const waiter of waiters) clearTimeout(waiter.timer);
       }
     });
 

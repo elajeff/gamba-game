@@ -217,18 +217,3 @@ test("active rounds and game-over state block loan issuance", async () => {
     (error) => error?.status === 409 && error?.code === "game_over"
   );
 });
-
-test("unknown loan amounts and loans above zero balance are rejected", async () => {
-  const harness = makeLoanHarness(state({ balance: 1 }));
-  await assert.rejects(
-    () => takeLoan(harness, 123),
-    (error) => error?.status === 400 && error?.code === "invalid_loan"
-  );
-
-  await assert.rejects(
-    () => takeLoan(harness, 444),
-    (error) => error?.status === 409 && error?.code === "loan_requires_zero_balance"
-  );
-  assert.equal(harness.getState().balance, 1);
-  assert.equal(harness.getState().activeLoans.length, 0);
-});

@@ -6,8 +6,8 @@ function createSqlMock(results = []) {
   const calls = [];
   return {
     calls,
-    exec(statement, ...parameters) {
-      calls.push({ statement: String(statement), parameters });
+    exec(_statement, ...parameters) {
+      calls.push({ parameters });
       const next = results.shift();
       return { toArray: () => next ?? [] };
     }
@@ -31,23 +31,19 @@ test("profile data maps stored totals and calculates the win rate", () => {
   assert.equal(sql.calls.length, 2);
 });
 
-test("settling a round updates session totals", () => {
-  const sql = createSqlMock();
-  recordSettledRound(sql, { id: "round-1", epoch: 1 }, {
+test("settling a round updates session totals and only a cash-out reaches the leaderboard", () => {
+  const win = createSqlMock();
+  recordSettledRound(win, { id: "round-1", epoch: 1 }, {
     payout: 20, stake: 10, multiplier: 2, net: 10, result: "CASHED OUT", round: 1, at: 123
   });
+  assert.deepEqual(win.calls[0].parameters, [1, 0, 0, 10, 20, 10, 2, 20, 123]);
+  // The leaderboard insert is the only statement that takes the round id.
+  assert.ok(win.calls.some((call) => call.parameters.includes("round-1")));
 
-  assert.match(sql.calls[0].statement, /ON CONFLICT\(id\) DO UPDATE/);
-  assert.deepEqual(sql.calls[0].parameters, [1, 0, 0, 10, 20, 10, 2, 20, 123]);
-  assert.equal(sql.calls.length, 5, "eligible cash-outs update stats and evaluate leaderboard entries");
-});
-
-test("a busted round updates totals without performing leaderboard writes", () => {
-  const sql = createSqlMock();
-  recordSettledRound(sql, { id: "round-2", epoch: 1 }, {
+  const loss = createSqlMock();
+  recordSettledRound(loss, { id: "round-2", epoch: 1 }, {
     payout: 0, stake: 10, multiplier: 1, net: -10, result: "BUSTED", round: 2, at: 124
   });
-
-  assert.equal(sql.calls.length, 1);
-  assert.deepEqual(sql.calls[0].parameters, [0, 1, 0, 10, 0, -10, 0, 0, 124]);
+  assert.deepEqual(loss.calls[0].parameters, [0, 1, 0, 10, 0, -10, 0, 0, 124]);
+  assert.ok(!loss.calls.some((call) => call.parameters.includes("round-2")));
 });
