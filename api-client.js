@@ -1,12 +1,11 @@
 // Small browser API client. It owns HTTP mechanics, while game.js owns game state and UI messages.
 export class ApiError extends Error {
-  constructor(status, data, rawText = "") {
+  constructor(status, data) {
     super(data?.message || data?.error || `Backend request failed (HTTP ${status}).`);
     this.name = "ApiError";
     this.status = status;
     this.code = data?.error || "http_error";
     this.data = data;
-    this.rawText = rawText;
   }
 }
 
@@ -25,7 +24,6 @@ export function createApiClient({ baseUrl, getToken, timeoutMs, fetchImpl = (...
 
     // Only retry operations with an idempotency key, reusing exactly the same key and body.
     const maxAttempts = options.idempotencyKey ? 2 : 1;
-    let lastNetworkError = null;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       let response;
       let text;
@@ -43,7 +41,6 @@ export function createApiClient({ baseUrl, getToken, timeoutMs, fetchImpl = (...
         // Keep the timeout active while reading the body too, not just until headers arrive.
         text = await response.text();
       } catch (error) {
-        lastNetworkError = error;
         if (attempt + 1 < maxAttempts) continue;
         if (error?.name === "AbortError") {
           throw new Error("The game server took too long to respond. Check your connection and try again.");
@@ -55,10 +52,9 @@ export function createApiClient({ baseUrl, getToken, timeoutMs, fetchImpl = (...
       }
 
       let data = null;
-      try { data = text ? JSON.parse(text) : null; } catch { /* Keep raw text for the HTTP error. */ }
-      if (!response.ok) throw new ApiError(response.status, data, text);
+      try { data = text ? JSON.parse(text) : null; } catch { /* The body is not JSON, so the error falls back to the status code. */ }
+      if (!response.ok) throw new ApiError(response.status, data);
       return data || {};
     }
-    throw lastNetworkError || new Error("Game server request failed.");
   };
 }
