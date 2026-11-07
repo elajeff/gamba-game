@@ -12,6 +12,5 @@ type = "durable-object"
 storage = "sqlite"
 
 [vars]
-# Set this to the exact GitHub Pages origin, e.g. https://YOURNAME.github.io
 ALLOWED_ORIGINS = "http://localhost:5500,https://elajeff.github.io"
 HOUSE_EDGE_PERCENT = "1"
