@@ -1004,7 +1004,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       const due = overdue.reduce((sum, loan) => sum + loan.repayment, 0);
       elements.bankruptCopy.textContent = `Your balance is 0 gold. You can take another available loan, but ${formatGold(due)} gold in overdue repayments must be settled immediately.`;
     } else if (game.activeLoans.length) {
-      elements.bankruptCopy.textContent = "Your balance is 0 gold. You can borrow again, but existing repayment deadlines still apply.";
+      elements.bankruptCopy.textContent = "Your balance is 0 gold. You can borrow again, which extends your existing repayment deadlines.";
     } else {
       elements.bankruptCopy.textContent = "Your balance is 0 gold. Take an available loan to continue, or end this game.";
     }
@@ -1113,6 +1113,8 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       setMessage(`Borrowed ${formatGold(principal)} gold. Repay ${formatGold(response.loan.repayment)} within ${response.loan.roundsLeft} rounds.${extText}${immediateText}`, "success");
       elements.multiplier.classList.remove("busted");
       elements.meterTrack.classList.remove("busted");
+      game.multiplier = 1;
+      updateMultiplierDisplay();
       elements.multiplierCaption.textContent = "Place a bet to start the next round.";
       elements.holdButtonTitle.textContent = "HOLD TO START";
       setRoundStatus("LOAN TAKEN");
