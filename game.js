@@ -625,7 +625,8 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       // While startup is pending, the interface remains at x1.00. Keep that visible
       // boundary as the release cap if the round was created before this intent arrives.
       body: { startKey, requestedMultiplierCents: 100 },
-      idempotencyKey: releaseKey
+      idempotencyKey: releaseKey,
+      keepalive: true
     }).then((result) => {
       if (game.startRequestKey === startKey) game.releaseIntentResult = result;
       return result;
@@ -904,7 +905,9 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       const response = await api("/api/round/cashout", {
         method: "POST",
         body: { roundId, requestedMultiplierCents },
-        idempotencyKey: game.activeRound.cashoutKey
+        idempotencyKey: game.activeRound.cashoutKey,
+        // The release may come from pagehide, so let the request outlive the page.
+        keepalive: true
       });
       await finishFromServerResult(response, roundId);
     } catch (error) {

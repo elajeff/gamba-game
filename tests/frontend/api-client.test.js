@@ -28,6 +28,22 @@ test("API client sends the current session token and JSON body", async () => {
   assert.equal(request.options.body, JSON.stringify({ stake: 25 }));
 });
 
+test("API client passes keepalive to fetch", async () => {
+  let requestOptions;
+  const api = createApiClient({
+    baseUrl: "https://example.test",
+    getToken: () => null,
+    timeoutMs: 1000,
+    fetchImpl: async (url, options) => {
+      requestOptions = options;
+      return new Response('{"ok":true}', { status: 200 });
+    }
+  });
+
+  await api("/api/round/cashout", { method: "POST", body: { roundId: "r1" }, keepalive: true });
+  assert.equal(requestOptions.keepalive, true);
+});
+
 test("API client retries a network failure only when an idempotency key is supplied", async () => {
   let calls = 0;
   const api = createApiClient({
