@@ -8,7 +8,7 @@
 
 - `game.js` owns the active game state and coordinates round lifecycle, input and recovery.
 - `round-clock.js` contains the small, pure calculations used to estimate server time and render the visible multiplier. It does not decide whether a cash-out succeeds; only the server does.
-- `browser-storage.js` handles saving and restoring the guest session and the last revealed fairness seed, including the migration from the older tab-only session storage. Storage failures do not replace the server as the source of truth.
+- `browser-storage.js` handles saving and restoring the guest session and the last revealed fairness seed. Storage failures do not replace the server as the source of truth.
 - `api-client.js` handles authenticated HTTP requests, timeouts, idempotent retries and API errors; it reads the current session token through a small callback instead of owning game state.
 - `game-renderer.js` updates the DOM from supplied current state. It does not make network requests or decide game outcomes.
 - `galaxy-background.js` paints the background.

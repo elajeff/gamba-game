@@ -11,7 +11,6 @@ export class ApiError extends Error {
 
 export function createApiClient({ baseUrl, getToken, timeoutMs, fetchImpl = (...args) => fetch(...args) }) {
   return async function api(path, options = {}) {
-    if (!baseUrl) throw new Error("Backend URL is not configured. Check backend-config.js.");
     const method = options.method || "GET";
     const headers = new Headers();
     if (options.body !== undefined) headers.set("content-type", "application/json");
@@ -28,16 +27,16 @@ export function createApiClient({ baseUrl, getToken, timeoutMs, fetchImpl = (...
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       let response;
       let text;
-      const controller = typeof AbortController === "function" ? new AbortController() : null;
+      const controller = new AbortController();
       const externalSignal = options.signal || null;
-      const relayExternalAbort = () => controller?.abort(externalSignal?.reason);
+      const relayExternalAbort = () => controller.abort(externalSignal.reason);
       if (externalSignal?.aborted) relayExternalAbort();
       else externalSignal?.addEventListener("abort", relayExternalAbort, { once: true });
-      const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
       try {
         response = await fetchImpl(`${baseUrl}${path}`, {
           ...requestOptions,
-          ...(controller ? { signal: controller.signal } : externalSignal ? { signal: externalSignal } : {})
+          signal: controller.signal
         });
         // Keep the timeout active while reading the body too, not just until headers arrive.
         text = await response.text();
@@ -48,7 +47,7 @@ export function createApiClient({ baseUrl, getToken, timeoutMs, fetchImpl = (...
         }
         throw new Error("Couldn't reach the game server. Check your connection and try again.");
       } finally {
-        if (timeoutId !== null) clearTimeout(timeoutId);
+        clearTimeout(timeoutId);
         externalSignal?.removeEventListener("abort", relayExternalAbort);
       }
 

@@ -116,8 +116,3 @@ test("API client preserves structured HTTP error details", async () => {
     return true;
   });
 });
-
-test("API client clearly reports missing backend configuration", async () => {
-  const api = createApiClient({ baseUrl: "", getToken: () => null, timeoutMs: 1000 });
-  await assert.rejects(api("/api/state"), /Backend URL is not configured/);
-});
