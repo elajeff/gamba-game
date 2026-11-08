@@ -165,7 +165,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
 
   function loadStoredSession() {
     try {
-      return readStoredSession(localStorage, sessionStorage, SESSION_STORAGE_KEY);
+      return readStoredSession(localStorage, SESSION_STORAGE_KEY);
     } catch {
       return null;
     }
@@ -173,7 +173,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
 
   function loadSavedLastReveal() {
     try {
-      return readLastReveal(localStorage, sessionStorage, LAST_REVEAL_KEY);
+      return readLastReveal(localStorage, LAST_REVEAL_KEY);
     } catch {
       return null;
     }
@@ -257,10 +257,8 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       commitment: revealed.commitment
     };
     try {
-      storeLastReveal(localStorage, sessionStorage, LAST_REVEAL_KEY, game.lastReveal);
-    } catch {
-      try { sessionStorage.setItem(LAST_REVEAL_KEY, JSON.stringify(game.lastReveal)); } catch { /* Browser storage may be unavailable. */ }
-    }
+      storeLastReveal(localStorage, LAST_REVEAL_KEY, game.lastReveal);
+    } catch { /* The server's fairness endpoint remains authoritative if browser storage is unavailable. */ }
     renderFairness();
   }
 
@@ -568,7 +566,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
         return;
       } catch (error) {
         if (error.status !== 401) throw error;
-        try { localStorage.removeItem(SESSION_STORAGE_KEY); sessionStorage.removeItem(SESSION_STORAGE_KEY); } catch { /* ignore */ }
+        try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch { /* ignore */ }
         game.sessionId = null;
         game.token = null;
       }
@@ -579,7 +577,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     game.sessionId = created.sessionId;
     game.token = created.token;
     try {
-      storeSession(localStorage, sessionStorage, SESSION_STORAGE_KEY, {
+      storeSession(localStorage, SESSION_STORAGE_KEY, {
         sessionId: game.sessionId,
         token: game.token
       });
