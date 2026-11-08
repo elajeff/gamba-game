@@ -21,6 +21,7 @@ export function createApiClient({ baseUrl, getToken, timeoutMs, fetchImpl = (...
 
     const requestOptions = { method, headers, cache: "no-store" };
     if (options.body !== undefined) requestOptions.body = JSON.stringify(options.body);
+    if (options.keepalive) requestOptions.keepalive = true;
 
     // Only retry operations with an idempotency key, reusing exactly the same key and body.
     const maxAttempts = options.idempotencyKey ? 2 : 1;
