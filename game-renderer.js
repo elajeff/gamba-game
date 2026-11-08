@@ -144,7 +144,7 @@ export function createGameRenderer({
 
     const allTaken = hasUsedAllLoans();
     if (allTaken) elements.loanWarning.textContent = "All three loans have been used in this game.";
-    else if (game.activeLoans.length) elements.loanWarning.textContent = "Taking another loan extends existing deadlines according to the displayed rules.";
+    else if (game.activeLoans.length) elements.loanWarning.textContent = "Another loan adds half the nearest deadline, rounded up, to your existing deadlines and the new one.";
     else elements.loanWarning.textContent = "Larger loans have higher fees and shorter deadlines.";
     elements.bankLoanButton.disabled = !canBorrow || allTaken || game.loanPending;
   }
