@@ -97,7 +97,6 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     initializing: true,
     sessionId: null,
     token: null,
-    state: null,
     balance: STARTING_GOLD,
     activeBet: 0,
     multiplier: 1,
@@ -134,8 +133,8 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     gameOver: false,
     waitingForLoan: false,
     activeLoans: [],
-    loansTaken: { 444: false, 888: false, 1500: false },
-    loansRepaid: { 444: false, 888: false, 1500: false },
+    loansTaken: {},
+    loansRepaid: {},
     history: [],
     profile: { stats: null, leaderboard: [] },
     roundNumber: 0,
@@ -219,7 +218,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
   }
 
   function getRepaidFlags(state) {
-    const flags = { 444: false, 888: false, 1500: false, ...(state?.loansRepaid || {}) };
+    const flags = { ...(state?.loansRepaid || {}) };
     for (const item of state?.history || []) {
       for (const repayment of item.repayments || []) flags[repayment.principal] = true;
     }
@@ -297,13 +296,12 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
 
   function applyState(state, profile = null, { updateModals = true } = {}) {
     if (!state) throw new Error("Backend returned no game state.");
-    game.state = state;
     game.balance = Number(state.balance);
     game.roundNumber = Number(state.roundNumber) || 0;
     game.gameOver = Boolean(state.gameOver);
     game.waitingForLoan = Boolean(state.waitingForLoan);
     game.activeLoans = Array.isArray(state.activeLoans) ? state.activeLoans : [];
-    game.loansTaken = { 444: false, 888: false, 1500: false, ...(state.loansTaken || {}) };
+    game.loansTaken = { ...(state.loansTaken || {}) };
     game.loansRepaid = getRepaidFlags(state);
     game.history = Array.isArray(state.history) ? state.history : [];
     game.clientSeed = state.clientSeed || null;
@@ -322,12 +320,28 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     }
   }
 
+  function setHoldPressed(pressed) {
+    elements.holdButton.classList.toggle("is-holding", pressed);
+    elements.holdButton.setAttribute("aria-pressed", String(pressed));
+  }
+
+  function takeHold(source, identifier) {
+    game.holdSource = source;
+    game.activePointerId = source === "pointer" ? identifier : null;
+    game.keyboardCode = source === "keyboard" ? identifier : null;
+  }
+
   function clearHoldState() {
     game.holdSource = null;
     game.activePointerId = null;
     game.keyboardCode = null;
-    elements.holdButton.classList.remove("is-holding");
-    elements.holdButton.setAttribute("aria-pressed", "false");
+    setHoldPressed(false);
+  }
+
+  function resetMultiplierBoard() {
+    game.multiplier = 1;
+    elements.multiplier.classList.remove("busted");
+    updateMultiplierDisplay();
   }
 
   function stopAnimation() {
@@ -370,7 +384,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
   function scheduleStatusPoll() {
     stopStatusPolling();
     if (!game.active || !game.activeRound || document.hidden || game.cashoutPending) return;
-    const pushConnected = typeof WebSocket === "function" && game.eventSocket?.readyState === WebSocket.OPEN;
+    const pushConnected = game.eventSocket?.readyState === WebSocket.OPEN;
     const baseDelay = pushConnected ? STATUS_POLL_MS : STATUS_FALLBACK_POLL_MS;
     const retryDelay = game.statusFailureCount > 0
       ? Math.min(30_000, baseDelay * (2 ** Math.min(game.statusFailureCount, 5)))
@@ -386,12 +400,10 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     if (!game.active || !game.activeRound || game.pollPending || game.cashoutPending) return;
     game.pollPending = true;
     const roundId = game.activeRound.id;
-    const pollController = typeof AbortController === "function" ? new AbortController() : null;
+    const pollController = new AbortController();
     game.pollAbortController = pollController;
     try {
-      const result = await api(`/api/round/status?id=${encodeURIComponent(roundId)}`, {
-        ...(pollController ? { signal: pollController.signal } : {})
-      });
+      const result = await api(`/api/round/status?id=${encodeURIComponent(roundId)}`, { signal: pollController.signal });
       game.statusFailureCount = 0;
       if (result.status === "running") {
         // Estimate server clock offset for a smoother display; only server responses settle a round.
@@ -402,7 +414,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       await finishFromServerResult(result, roundId);
     } catch (error) {
       // Cash-out deliberately aborts a redundant status request. Don't surface that as a network failure.
-      if (game.cashoutPending || pollController?.signal.aborted) return;
+      if (game.cashoutPending || pollController.signal.aborted) return;
       game.statusFailureCount = Math.min(game.statusFailureCount + 1, 5);
       const retrySeconds = Math.min(30, (STATUS_POLL_MS * (2 ** game.statusFailureCount)) / 1000);
       setMessage(`Connection interrupted. Your round remains server-controlled. Retrying status in about ${retrySeconds}s. ${error.message}`, "danger");
@@ -412,7 +424,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     }
   }
 
-  async function ensureClientSeed() {
+  async function registerClientSeed() {
     if (game.clientSeed) return;
     const seed = newClientSeed();
     // Commitment has already been received from /api/session or /api/state.
@@ -452,8 +464,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     setMessage(recovered
       ? "Recovered an interrupted round. To prevent a delayed cash-out advantage, the server will settle it at its committed crash or x10 cap."
       : `Bet placed: ${formatGold(game.activeBet)} gold.`, recovered ? "danger" : "success");
-    elements.holdButton.classList.toggle("is-holding", !recovered);
-    elements.holdButton.setAttribute("aria-pressed", recovered ? "false" : "true");
+    setHoldPressed(!recovered);
     scheduleAnimation();
     scheduleStatusPoll();
     updateUI();
@@ -500,7 +511,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
   }
 
   function connectRoundEvents() {
-    if (typeof WebSocket !== "function" || !API_BASE || !game.token || document.hidden) return;
+    if (!API_BASE || !game.token || document.hidden) return;
     if (game.eventSocket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(game.eventSocket.readyState)) return;
     const wsBase = API_BASE.replace(/^https:/i, "wss:").replace(/^http:/i, "ws:");
     let socket;
@@ -554,10 +565,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
         updateCommitment(snapshot);
         applyState(snapshot.state, snapshot.profile);
         game.ready = true;
-        if (!game.clientSeed) {
-          await ensureClientSeed();
-          if (game.state) game.state.clientSeed = game.clientSeed;
-        }
+        await registerClientSeed();
         if (snapshot.state.activeRound) activateExistingRound(snapshot.state.activeRound, true);
         else showRecoveredLastResult(snapshot.state);
         updateUI();
@@ -587,10 +595,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     syncServerClock(created.serverTime);
     updateCommitment(created);
     applyState(created.state, created.profile);
-    // The session response already contains state/profile. Set the client seed directly to avoid
-    // an unnecessary extra Worker + Durable Object request on every new session.
-    await ensureClientSeed();
-    if (game.state) game.state.clientSeed = game.clientSeed;
+    await registerClientSeed();
     game.ready = true;
     setMessage("Connected securely. Ready to play.", "success");
     updateUI();
@@ -636,6 +641,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
   }
 
   function clearPendingStartTracking() {
+    game.releaseRequestedWhileStarting = false;
     game.startRequestKey = null;
     game.releaseIntentPromise = null;
     game.releaseIntentResult = null;
@@ -654,17 +660,10 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     elements.betNote.textContent = "The server validates and deducts your stake.";
     elements.betNote.classList.remove("error");
     game.startPending = true;
-    game.releaseRequestedWhileStarting = false;
-    game.multiplier = 1;
-    elements.multiplier.classList.remove("busted");
-    elements.meterTrack.classList.remove("busted");
-    updateMultiplierDisplay();
-    game.holdSource = source;
-    game.activePointerId = source === "pointer" ? identifier : null;
-    game.keyboardCode = source === "keyboard" ? identifier : null;
+    resetMultiplierBoard();
+    takeHold(source, identifier);
     elements.holdButtonTitle.textContent = "STARTING ROUND…";
-    elements.holdButton.classList.add("is-holding");
-    elements.holdButton.setAttribute("aria-pressed", "true");
+    setHoldPressed(true);
     setMessage("Starting your round…");
     updateUI();
 
@@ -672,14 +671,12 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     game.pendingSettlementEvent = null;
     const roundNumberBeforeStart = game.roundNumber;
     let startRequestWasSent = false;
+    clearPendingStartTracking();
     game.startRequestKey = idempotencyKey;
-    game.releaseIntentPromise = null;
-    game.releaseIntentResult = null;
-    game.releaseCashoutKey = null;
     try {
       // A previous reset may have succeeded even if registering its client seed timed out.
       // Repair that state before attempting to create a round.
-      await ensureClientSeed();
+      await registerClientSeed();
       // If released during seed repair, queue the intent before start is submitted.
       sendEarlyReleaseIntent();
       const startRequest = api("/api/round/start", {
@@ -694,7 +691,6 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       // The start response itself is authoritative if the queued release was consumed in the
       // start transaction. Do not wait for a slower parallel release-intent response unnecessarily.
       if (response.result && response.roundId && response.state) {
-        game.releaseRequestedWhileStarting = false;
         clearPendingStartTracking();
         await finishFromServerResult(response, response.roundId);
         return;
@@ -702,7 +698,6 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       const pendingSettlement = game.pendingSettlementEvent;
       if (pendingSettlement?.startKey === idempotencyKey && pendingSettlement.roundId === response.round?.id) {
         game.pendingSettlementEvent = null;
-        game.releaseRequestedWhileStarting = false;
         clearPendingStartTracking();
         await finishFromServerResult(pendingSettlement, pendingSettlement.roundId);
         return;
@@ -713,7 +708,6 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       // safely through the Durable Object's serialized settlement checks.
       const releaseResult = released ? game.releaseIntentResult : null;
       if (releaseResult?.releaseMode === "settled" && releaseResult.roundId && releaseResult.state) {
-        game.releaseRequestedWhileStarting = false;
         clearPendingStartTracking();
         await finishFromServerResult(releaseResult, releaseResult.roundId);
         return;
@@ -722,15 +716,11 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       game.balance = response.state.balance;
       game.activeRound = { ...response.round, cashoutKey: released ? game.releaseCashoutKey : null };
       game.roundStartedAt = Number(response.round.startedAt);
-        game.active = true;
+      game.active = true;
       game.recoveredRound = false;
-      game.multiplier = 1;
       game.lastSettledRoundId = null;
       elements.multiplier.classList.add("live");
-      elements.multiplier.classList.remove("busted");
-      elements.meterTrack.classList.remove("busted");
-      elements.holdButton.classList.add("is-holding");
-      elements.holdButton.setAttribute("aria-pressed", "true");
+      setHoldPressed(true);
       elements.holdButtonTitle.textContent = "RELEASE TO CASH OUT";
       elements.multiplierCaption.textContent = "Release to cash out at the current multiplier.";
       setRoundStatus("RUNNING", "live");
@@ -738,7 +728,6 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       updateUI();
       scheduleAnimation();
       scheduleStatusPoll();
-      game.releaseRequestedWhileStarting = false;
       clearPendingStartTracking();
       if (released) await cashOut();
     } catch (error) {
@@ -746,7 +735,6 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       const releaseResult = game.releaseIntentResult;
       const releaseCashoutKey = game.releaseCashoutKey;
       game.startPending = false;
-      game.releaseRequestedWhileStarting = false;
       clearPendingStartTracking();
       clearHoldState();
       if (wasReleased && releaseResult?.releaseMode === "settled" && releaseResult.roundId && releaseResult.state) {
@@ -772,9 +760,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
           if (game.activeRound) game.activeRound.cashoutKey = releaseCashoutKey || null;
           await cashOut();
         } else {
-          game.holdSource = source;
-          game.activePointerId = source === "pointer" ? identifier : null;
-          game.keyboardCode = source === "keyboard" ? identifier : null;
+          takeHold(source, identifier);
           updateUI();
         }
         return;
@@ -880,8 +866,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     stopAnimation();
     cancelStatusPollingForCashout();
     elements.holdButtonTitle.textContent = "CASHING OUT…";
-    elements.holdButton.classList.remove("is-holding");
-    elements.holdButton.setAttribute("aria-pressed", "false");
+    setHoldPressed(false);
     setRoundStatus("CASHING OUT");
     setMessage("Release received. Confirming your payout…");
   }
@@ -934,9 +919,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
   // the hold over so its release can retry. Touch gives every press a new pointerId.
   function retakeReleasedHold(source, identifier) {
     if (elements.holdButton.classList.contains("is-holding")) return;
-    game.holdSource = source;
-    game.activePointerId = source === "pointer" ? identifier : null;
-    game.keyboardCode = source === "keyboard" ? identifier : null;
+    takeHold(source, identifier);
   }
 
   function releaseHold(source, identifier = null) {
@@ -1045,10 +1028,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     elements.acceptDefeatButton.disabled = true;
     try {
       const response = await api("/api/game/end", { method: "POST", body: {}, idempotencyKey: newIdempotencyKey() });
-      // Merge known flags with the response so a partial payload cannot make an empty object
-      // accidentally satisfy Array.every() and skip the remaining loan decision.
-      const responseLoanFlags = { ...game.loansTaken, ...(response.state?.loansTaken || {}) };
-      const allLoansUsed = hasUsedAllLoans(responseLoanFlags);
+      const allLoansUsed = hasUsedAllLoans(response.state.loansTaken);
       if (allLoansUsed) {
         applyState(response.state, response.profile, { updateModals: false });
         elements.bankruptModal.classList.add("hidden");
@@ -1109,10 +1089,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       const immediate = (response.immediateRepayments || []).map((item) => `${formatGold(item.repayment)} gold`).join(" and ");
       const immediateText = immediate ? ` Immediate overdue repayment: ${immediate}.` : "";
       setMessage(`Borrowed ${formatGold(principal)} gold. Repay ${formatGold(response.loan.repayment)} within ${response.loan.roundsLeft} rounds.${extText}${immediateText}`, "success");
-      elements.multiplier.classList.remove("busted");
-      elements.meterTrack.classList.remove("busted");
-      game.multiplier = 1;
-      updateMultiplierDisplay();
+      resetMultiplierBoard();
       elements.multiplierCaption.textContent = "Place a bet to start the next round.";
       elements.holdButtonTitle.textContent = "HOLD TO START";
       setRoundStatus("LOAN TAKEN");
@@ -1145,17 +1122,12 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       elements.loanModal.classList.add("hidden");
       resetBankruptcyModal();
       elements.betInput.value = "88";
-      elements.multiplier.classList.remove("busted", "live");
-      elements.meterTrack.classList.remove("busted");
-      game.multiplier = 1;
-      updateMultiplierDisplay();
+      elements.multiplier.classList.remove("live");
+      resetMultiplierBoard();
       elements.multiplierCaption.textContent = "Hold to start. Release to cash out.";
       elements.holdButtonTitle.textContent = "HOLD TO START";
       setRoundStatus("READY");
-      await ensureClientSeed();
-      if (game.state) game.state.clientSeed = game.clientSeed;
-      // Reset already returned complete state/profile; registering the new client seed above is
-      // sufficient, so avoid a redundant extra /api/state request.
+      await registerClientSeed();
       setMessage(`New seed batch started. Batch ${reset.revealed.epoch} is now available to verify.`, "success");
       updateUI();
       renderFairness();
