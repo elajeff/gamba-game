@@ -59,6 +59,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     bankruptKicker: document.getElementById("bankrupt-kicker"),
     bankruptTitle: document.getElementById("bankrupt-title"),
     bankruptCopy: document.getElementById("bankrupt-copy"),
+    bankruptError: document.getElementById("bankrupt-error"),
     bankruptActions: document.getElementById("bankrupt-actions"),
     acceptDefeatButton: document.getElementById("accept-defeat-button"),
     bankLoanButton: document.getElementById("bank-loan-button"),
@@ -69,6 +70,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     gameoverEyebrow: document.getElementById("gameover-eyebrow"),
     gameoverTitle: document.getElementById("gameover-title"),
     gameoverCopy: document.getElementById("gameover-copy"),
+    gameoverError: document.getElementById("gameover-error"),
     finalBalance: document.getElementById("final-balance"),
     newGameButton: document.getElementById("new-game-button"),
     fairnessEpoch: document.getElementById("fairness-epoch"),
@@ -642,7 +644,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
   }
 
   async function startRound(source, identifier = null) {
-    if (!game.ready || game.active || game.startPending || game.gameOver || game.waitingForLoan || game.balance <= 0) return;
+    if (!game.ready || game.active || game.startPending || game.resetPending || game.gameOver || game.waitingForLoan || game.balance <= 0) return;
     const stake = getBet();
     if (stake === null) {
       elements.betNote.textContent = `Enter a whole number between 1 and ${formatGold(game.balance)}.`;
@@ -968,9 +970,18 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     if (focusable) focusable.focus();
   }
 
+  // The dialog backdrop covers the page message, so failures from dialog buttons are repeated
+  // inside the dialogs. Only the open dialog's line is visible.
+  function setDialogError(message) {
+    setMessage(message, "danger");
+    elements.bankruptError.textContent = message;
+    elements.gameoverError.textContent = message;
+  }
+
   function resetBankruptcyModal() {
     elements.bankruptKicker.textContent = "BALANCE: 0 GOLD";
     elements.bankruptTitle.textContent = "No gold left";
+    elements.bankruptError.textContent = "";
     elements.acceptDefeatButton.textContent = "Accept defeat";
     elements.bankLoanButton.hidden = false;
     elements.bankLoanButton.disabled = false;
@@ -1018,6 +1029,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     elements.gameoverEyebrow.textContent = eyebrow;
     elements.gameoverTitle.textContent = title;
     elements.gameoverCopy.textContent = copy;
+    elements.gameoverError.textContent = "";
     elements.finalBalance.textContent = `${formatGold(game.balance)} GOLD`;
     elements.gameoverModal.classList.remove("hidden");
     elements.bankruptModal.classList.add("hidden");
@@ -1051,7 +1063,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
         showGameOver("BALANCE DEPLETED", "Your balance reached 0 gold and you chose not to borrow again.", "No gold left");
       }
     } catch (error) {
-      setMessage(error.message || "Couldn't end this game on the server.", "danger");
+      setDialogError(error.message || "Couldn't end this game on the server.");
     } finally {
       game.endPending = false;
       elements.acceptDefeatButton.disabled = false;
@@ -1062,6 +1074,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     if (game.balance > 0 || !game.waitingForLoan || game.gameOver || game.active) return;
     if (hasUsedAllLoans()) return;
     updateLoanOptions();
+    elements.bankruptError.textContent = "";
     elements.bankruptModal.classList.add("hidden");
     elements.loanModal.classList.remove("hidden");
     focusFirst(elements.loanModal);
@@ -1102,9 +1115,13 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       setRoundStatus("LOAN TAKEN");
       elements.holdButton.focus();
     } catch (error) {
-      setMessage(error.message || "The loan request failed.", "danger");
       try { await refreshState(); } catch { /* Keep last known state visible. */ }
-      if (game.waitingForLoan) elements.bankruptModal.classList.remove("hidden");
+      // Set after the refresh: it can reopen the "No gold left" dialog, which clears the error line.
+      setDialogError(error.message || "The loan request failed.");
+      // closeLoanModal focuses "Bank loan", which stays disabled while the loan is pending.
+      game.loanPending = false;
+      updateUI();
+      closeLoanModal();
     } finally {
       game.loanPending = false;
       updateUI();
@@ -1120,10 +1137,6 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       saveLastReveal(reset.revealed);
       updateCommitment(reset);
       applyState(reset.state, reset.profile);
-      await ensureClientSeed();
-      if (game.state) game.state.clientSeed = game.clientSeed;
-      // Reset already returned complete state/profile; registering the new client seed above is
-      // sufficient, so avoid a redundant extra /api/state request.
       elements.gameoverModal.classList.add("hidden");
       elements.bankruptModal.classList.add("hidden");
       elements.loanModal.classList.add("hidden");
@@ -1136,12 +1149,16 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       elements.multiplierCaption.textContent = "Hold to start. Release to cash out.";
       elements.holdButtonTitle.textContent = "HOLD TO START";
       setRoundStatus("READY");
+      await ensureClientSeed();
+      if (game.state) game.state.clientSeed = game.clientSeed;
+      // Reset already returned complete state/profile; registering the new client seed above is
+      // sufficient, so avoid a redundant extra /api/state request.
       setMessage(`New seed batch started. Batch ${reset.revealed.epoch} is now available to verify.`, "success");
       updateUI();
       renderFairness();
       elements.holdButton.focus();
     } catch (error) {
-      setMessage(error.message || "Couldn't start a new game on the server.", "danger");
+      setDialogError(error.message || "Couldn't start a new game on the server.");
     } finally {
       game.resetPending = false;
       elements.newGameButton.disabled = false;
