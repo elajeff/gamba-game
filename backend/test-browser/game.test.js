@@ -123,6 +123,8 @@ test("loan dialogs keep background controls inert and Escape returns to the deci
   await page.locator("#bank-loan-button").click();
   await page.locator(".brand").evaluate(link => link.focus());
   assert.equal(await page.evaluate(() => document.activeElement.closest("#loan-modal") !== null), true);
+  await page.locator("#loan-close-button").click();
+  await page.locator("#bank-loan-button").click();
   await page.keyboard.press("Escape");
   assert.equal(await page.locator("#loan-modal").evaluate(dialog => dialog.open), false);
   assert.equal(await page.locator("#bankrupt-modal").evaluate(dialog => dialog.matches(":modal")), true);
