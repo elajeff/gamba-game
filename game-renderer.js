@@ -178,7 +178,7 @@ export function createGameRenderer({
       elements.loanDescription.textContent = "No active loans";
       elements.loanRounds.textContent = "—";
     }
-    const canPlay = game.ready && !game.gameOver && !game.waitingForLoan && game.balance > 0 && !game.startPending && !game.initializing;
+    const canPlay = game.ready && !game.gameOver && !game.waitingForLoan && game.balance > 0 && !game.pendingStart && !game.initializing;
     elements.holdButton.disabled = !game.ready || game.initializing || game.recoveredRound || (!game.active && (game.gameOver || game.waitingForLoan || game.balance <= 0));
     elements.betInput.disabled = !canPlay || game.active;
     elements.maxButton.disabled = !canPlay || game.active;
