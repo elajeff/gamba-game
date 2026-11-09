@@ -234,7 +234,7 @@
         </footer>
       </main>
     </div>
-    <div class="modal-backdrop hidden" id="bankrupt-modal" role="dialog" aria-labelledby="bankrupt-title" aria-modal="true">
+    <dialog class="game-dialog" id="bankrupt-modal" aria-labelledby="bankrupt-title">
       <section class="modal-card">
         <p class="modal-kicker" id="bankrupt-kicker">BALANCE: 0 GOLD</p>
         <h2 id="bankrupt-title">No gold left</h2>
@@ -245,8 +245,8 @@
           <button class="button-primary" id="bank-loan-button" type="button">Bank loan</button>
         </div>
       </section>
-    </div>
-    <div class="modal-backdrop hidden" id="loan-modal" role="dialog" aria-labelledby="loan-title" aria-modal="true">
+    </dialog>
+    <dialog class="game-dialog" id="loan-modal" aria-labelledby="loan-title">
       <section class="modal-card loan-modal-card">
         <button class="modal-close" id="loan-close-button" aria-label="Close loan window" type="button">×</button>
         <p class="modal-kicker">CREDIT</p>
@@ -309,8 +309,8 @@
         </div>
         <p class="loan-warning" id="loan-warning">Larger loans have higher fees and shorter deadlines.</p>
       </section>
-    </div>
-    <div class="modal-backdrop hidden" id="gameover-modal" role="dialog" aria-labelledby="gameover-title" aria-modal="true">
+    </dialog>
+    <dialog class="game-dialog" id="gameover-modal" aria-labelledby="gameover-title">
       <section class="modal-card gameover-card">
         <p class="modal-kicker" id="gameover-eyebrow">GAME OVER</p>
         <h2 id="gameover-title">Game over</h2>
@@ -322,6 +322,6 @@
         </div>
         <button class="button-primary full-button" id="new-game-button" type="button">Start new game</button>
       </section>
-    </div>
+    </dialog>
   </body>
 </html>

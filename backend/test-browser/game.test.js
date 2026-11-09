@@ -23,7 +23,7 @@ async function openGame(t, options = {}) {
     await page.close();
   });
   const server = {
-    state: initialState(), round: null,
+    state: { ...initialState(), ...options.state }, round: null,
     startKeys: [], cashoutKeys: [],
     gate: options.holdStart ? Promise.withResolvers() : null,
     started: Promise.withResolvers()
@@ -116,4 +116,15 @@ test("an uncertain start reuses its key and recovers the same round", { timeout:
   await expectSettled(page);
   assert.equal(server.startKeys.length, 2);
   assert.equal(new Set(server.startKeys).size, 1);
+});
+
+test("loan dialogs keep background controls inert and Escape returns to the decision", { timeout: 15000 }, async t => {
+  const { page } = await openGame(t, { state: { balance: 0, waitingForLoan: true } });
+  await page.locator("#bank-loan-button").click();
+  await page.locator(".brand").evaluate(link => link.focus());
+  assert.equal(await page.evaluate(() => document.activeElement.closest("#loan-modal") !== null), true);
+  await page.keyboard.press("Escape");
+  assert.equal(await page.locator("#loan-modal").evaluate(dialog => dialog.open), false);
+  assert.equal(await page.locator("#bankrupt-modal").evaluate(dialog => dialog.matches(":modal")), true);
+  assert.equal(await page.evaluate(() => document.activeElement.id), "bank-loan-button");
 });
