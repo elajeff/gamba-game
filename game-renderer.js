@@ -69,8 +69,8 @@ export function createGameRenderer({
     }
   }
 
-  function renderProfile(profile = getGame().profile) {
-    if (!profile || !elements.statRounds) return;
+  function renderProfile() {
+    const profile = getGame().profile;
     const stats = profile.stats || {};
     const leaderboard = Array.isArray(profile.leaderboard) ? profile.leaderboard.slice(0, 5) : [];
     elements.statRounds.textContent = formatGold(stats.roundsPlayed || 0);

@@ -25,7 +25,7 @@ export async function verifyFairnessHistory(api, onProgress = () => {}) {
   const totalPages = Math.max(totalRounds, totalSeeds);
 
   for (let offset = pageSize; offset < totalPages; offset += pageSize) {
-    onProgress(`Loading records… ${Math.min(offset, totalPages).toLocaleString("en-US")} of ${totalPages.toLocaleString("en-US")}`);
+    onProgress(`Loading records… ${offset.toLocaleString("en-US")} of ${totalPages.toLocaleString("en-US")}`);
     const roundOffset = Math.min(offset, totalRounds);
     const seedOffset = Math.min(offset, totalSeeds);
     const page = await api(`/api/fairness?limit=${pageSize}&roundOffset=${roundOffset}&seedOffset=${seedOffset}`);
@@ -91,5 +91,5 @@ export async function verifyFairnessHistory(api, onProgress = () => {}) {
     else verifiedRounds += 1;
   }
 
-  return { verifiedSeeds, verifiedRounds, pendingRounds, totalRounds, totalSeeds, failures };
+  return { verifiedSeeds, verifiedRounds, pendingRounds, failures };
 }
