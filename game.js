@@ -315,8 +315,8 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     } else if (game.waitingForLoan && game.balance <= 0 && !game.active) {
       showBankruptcyPrompt();
     } else if (!game.waitingForLoan) {
-      elements.bankruptModal.classList.add("hidden");
-      elements.loanModal.classList.add("hidden");
+      closeDialog(elements.bankruptModal);
+      closeDialog(elements.loanModal);
     }
   }
 
@@ -854,8 +854,8 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     } else if (response.state.waitingForLoan && response.state.balance <= 0) {
       showBankruptcyPrompt();
     } else {
-      elements.bankruptModal.classList.add("hidden");
-      elements.loanModal.classList.add("hidden");
+      closeDialog(elements.bankruptModal);
+      closeDialog(elements.loanModal);
     }
     updateUI();
     if (game.settlingRoundId === roundId) game.settlingRoundId = null;
@@ -949,6 +949,17 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     }
   }
 
+  function closeDialog(dialog) {
+    if (dialog.open) dialog.close();
+  }
+
+  function showDialog(dialog) {
+    for (const other of [elements.bankruptModal, elements.loanModal, elements.gameoverModal]) {
+      if (other !== dialog) closeDialog(other);
+    }
+    if (!dialog.open) dialog.showModal();
+  }
+
   function focusFirst(container) {
     const focusable = container.querySelector("button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex='-1'])");
     if (focusable) focusable.focus();
@@ -989,7 +1000,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     } else {
       elements.bankruptCopy.textContent = "Your balance is 0 gold. Take an available loan to continue, or end this game.";
     }
-    elements.bankruptModal.classList.remove("hidden");
+    showDialog(elements.bankruptModal);
     updateUI();
     focusFirst(elements.bankruptModal);
   }
@@ -1002,9 +1013,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     elements.acceptDefeatButton.textContent = "Start new game";
     elements.bankLoanButton.hidden = true;
     elements.bankruptActions.classList.add("single-action");
-    elements.bankruptModal.classList.remove("hidden");
-    elements.gameoverModal.classList.add("hidden");
-    elements.loanModal.classList.add("hidden");
+    showDialog(elements.bankruptModal);
     updateUI();
     elements.acceptDefeatButton.focus();
   }
@@ -1015,9 +1024,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     elements.gameoverCopy.textContent = copy;
     elements.gameoverError.textContent = "";
     elements.finalBalance.textContent = `${formatGold(game.balance)} GOLD`;
-    elements.gameoverModal.classList.remove("hidden");
-    elements.bankruptModal.classList.add("hidden");
-    elements.loanModal.classList.add("hidden");
+    showDialog(elements.gameoverModal);
     updateUI();
     if (focus) elements.newGameButton.focus();
   }
@@ -1031,15 +1038,15 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       const allLoansUsed = hasUsedAllLoans(response.state.loansTaken);
       if (allLoansUsed) {
         applyState(response.state, response.profile, { updateModals: false });
-        elements.bankruptModal.classList.add("hidden");
-        elements.loanModal.classList.add("hidden");
-        elements.gameoverModal.classList.add("hidden");
+        closeDialog(elements.bankruptModal);
+        closeDialog(elements.loanModal);
+        closeDialog(elements.gameoverModal);
         setMessage("All three loans were used. Starting a new game…", "success");
         await startNewGame();
         // If the reset request fails, reuse the same dialog as a retry path instead of opening a second one.
         if (game.gameOver) showExhaustedLoansEndState();
       } else {
-        elements.bankruptModal.classList.add("hidden");
+        closeDialog(elements.bankruptModal);
         applyState(response.state, response.profile);
         showGameOver("BALANCE DEPLETED", "Your balance reached 0 gold and you chose not to borrow again.", "No gold left");
       }
@@ -1056,18 +1063,17 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     if (hasUsedAllLoans()) return;
     updateLoanOptions();
     elements.bankruptError.textContent = "";
-    elements.bankruptModal.classList.add("hidden");
-    elements.loanModal.classList.remove("hidden");
+    showDialog(elements.loanModal);
     focusFirst(elements.loanModal);
   }
 
   function closeLoanModal() {
-    elements.loanModal.classList.add("hidden");
     if (game.waitingForLoan) {
-      elements.bankruptModal.classList.remove("hidden");
+      showDialog(elements.bankruptModal);
       elements.bankLoanButton.focus();
     } else {
-      elements.loanCloseButton.focus();
+      closeDialog(elements.loanModal);
+      elements.holdButton.focus();
     }
   }
 
@@ -1077,8 +1083,8 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     updateUI();
     try {
       const response = await api("/api/loan", { method: "POST", body: { principal }, idempotencyKey: newIdempotencyKey() });
-      elements.loanModal.classList.add("hidden");
-      elements.bankruptModal.classList.add("hidden");
+      closeDialog(elements.loanModal);
+      closeDialog(elements.bankruptModal);
       applyState(response.state, response.profile);
       if (response.defaulted || response.state.gameOver) {
         showGameOver("LOAN DEFAULT", "The overdue repayments could not be settled. This game has ended.", "Loan not repaid");
@@ -1117,9 +1123,9 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       saveLastReveal(reset.revealed);
       updateCommitment(reset);
       applyState(reset.state, reset.profile);
-      elements.gameoverModal.classList.add("hidden");
-      elements.bankruptModal.classList.add("hidden");
-      elements.loanModal.classList.add("hidden");
+      closeDialog(elements.gameoverModal);
+      closeDialog(elements.bankruptModal);
+      closeDialog(elements.loanModal);
       resetBankruptcyModal();
       elements.betInput.value = "88";
       elements.multiplier.classList.remove("live");
@@ -1263,9 +1269,14 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
   });
   elements.verifyFairnessButton.addEventListener("click", () => void verifyRevealedFairness());
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !elements.loanModal.classList.contains("hidden")) closeLoanModal();
+    // These dialogs need a game decision. Chrome lets a page cancel a dialog's "cancel" event only
+    // once per user activation, so blocking it there would let a second Escape through.
+    if (event.key === "Escape" && document.querySelector(".game-dialog:modal")) {
+      event.preventDefault();
+      if (elements.loanModal.matches(":modal")) closeLoanModal();
+    }
     // A modal can take focus while the hold key is still down, so only a fresh press counts.
-    if (event.repeat && (event.key === "Enter" || event.key === " ") && event.target.closest(".modal-backdrop")) event.preventDefault();
+    if (event.repeat && (event.key === "Enter" || event.key === " ") && event.target.closest(".game-dialog")) event.preventDefault();
   });
 
   async function boot() {
