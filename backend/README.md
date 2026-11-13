@@ -8,6 +8,7 @@ Requirements: Node.js 22+. From this directory, run:
 
 ```powershell
 npm.cmd ci
+npx.cmd playwright install chromium
 npm.cmd test
 npm.cmd run dev
 ```

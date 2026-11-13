@@ -8,11 +8,13 @@
   "scripts": {
     "dev": "wrangler dev --port 8788",
     "deploy": "wrangler deploy",
-    "test": "npm run test:backend && npm run test:frontend",
+    "test": "npm run test:backend && npm run test:frontend && npm run test:browser",
     "test:backend": "node --test \"test/*.test.js\"",
-    "test:frontend": "node --test \"../tests/frontend/*.test.js\""
+    "test:frontend": "node --test \"../tests/frontend/*.test.js\"",
+    "test:browser": "node --test \"test-browser/*.test.js\""
   },
   "devDependencies": {
+    "playwright": "1.65.0",
     "wrangler": "4.151.0"
   },
   "overrides": {

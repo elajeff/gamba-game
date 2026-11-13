@@ -70,10 +70,11 @@ and point `backend-config.js` at `http://localhost:8788` while you test.
 ```powershell
 cd backend
 npm.cmd ci
+npx.cmd playwright install chromium
 npm.cmd test
 ```
 
-This runs the backend tests in `backend/test/` and the frontend module tests in `tests/frontend/`. They cover the crash formula, malformed requests, authentication, duplicate and concurrent requests, loans, alarms and WebSocket push. The integration tests start a local Worker with test-only secrets and never touch the deployed one. GitHub Actions runs the same suite on every push and pull request.
+This runs the backend tests in `backend/test/`, frontend module tests in `tests/frontend/`, and Chromium interaction tests in `backend/test-browser/`. The browser tests cover early release and uncertain round starts, using intercepted API and WebSocket traffic so they never call the deployed game. The backend tests cover the crash formula, malformed requests, authentication, duplicate and concurrent requests, loans, alarms and WebSocket push. The integration tests start a local Worker with test-only secrets and never touch the deployed one. GitHub Actions runs the same suite on every push and pull request.
 
 ## Deploy
 
