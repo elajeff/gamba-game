@@ -9,6 +9,7 @@ export function createGameRenderer({
   maxMultiplier,
   getGame,
   formatGold,
+  formatSignedGold,
   hasUsedAllLoans
 }) {
   function setMessage(message, type = "") {
@@ -60,9 +61,9 @@ export function createGameRenderer({
       multiplier.className = "history-multiplier";
       multiplier.textContent = `x${Math.max(0, Number(item.multiplier) || 0).toFixed(2)}`;
       const change = document.createElement("span");
-      change.className = `history-change ${(Number(item.net) || 0) >= 0 ? "positive" : "negative"}`;
       const net = Number(item.net) || 0;
-      change.textContent = `${net >= 0 ? "+" : "−"}${formatGold(Math.abs(net))}`;
+      change.className = `history-change ${net >= 0 ? "positive" : "negative"}`;
+      change.textContent = formatSignedGold(net);
       right.append(multiplier, change);
       row.append(left, right);
       elements.historyList.append(row);
@@ -76,7 +77,7 @@ export function createGameRenderer({
     elements.statRounds.textContent = formatGold(stats.roundsPlayed || 0);
     elements.statWinRate.textContent = `${(Number(stats.winRate) || 0).toFixed(1)}%`;
     const net = Number(stats.netResult) || 0;
-    elements.statNet.textContent = `${net >= 0 ? "+" : "−"}${formatGold(Math.abs(net))}`;
+    elements.statNet.textContent = formatSignedGold(net);
     elements.statNet.classList.toggle("positive", net >= 0);
     elements.statNet.classList.toggle("negative", net < 0);
     elements.statBestMultiplier.textContent = Number(stats.bestMultiplier) > 0 ? `x${Number(stats.bestMultiplier).toFixed(2)}` : "—";
@@ -101,7 +102,7 @@ export function createGameRenderer({
       const title = document.createElement("strong");
       title.textContent = `x${Number(item.multiplier).toFixed(2)} · Batch ${item.epoch}, round ${item.round_number}`;
       const sub = document.createElement("small");
-      sub.textContent = `Stake ${formatGold(item.stake)} · net ${Number(item.net) >= 0 ? "+" : "−"}${formatGold(Math.abs(Number(item.net) || 0))}`;
+      sub.textContent = `Stake ${formatGold(item.stake)} · net ${formatSignedGold(item.net)}`;
       detail.append(title, sub);
       const payout = document.createElement("strong");
       payout.className = "leaderboard-payout";
