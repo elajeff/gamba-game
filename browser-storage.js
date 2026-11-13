@@ -8,10 +8,6 @@ export function readStoredSession(localStore, key) {
   }
 }
 
-export function storeSession(localStore, key, session) {
-  localStore.setItem(key, JSON.stringify(session));
-}
-
 export function readLastReveal(localStore, key) {
   try {
     const value = localStore.getItem(key);
@@ -22,6 +18,6 @@ export function readLastReveal(localStore, key) {
   }
 }
 
-export function storeLastReveal(localStore, key, reveal) {
-  localStore.setItem(key, JSON.stringify(reveal));
+export function storeJson(localStore, key, value) {
+  localStore.setItem(key, JSON.stringify(value));
 }

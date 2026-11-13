@@ -4,7 +4,7 @@ import { createGameRenderer } from "./game-renderer.js";
 import { initGalaxyCanvas } from "./galaxy-background.js";
 import { verifyFairnessHistory } from "./fairness-client.js";
 import { calculateVisibleMultiplier, estimateServerTime, nextServerTimeAnchor } from "./round-clock.js";
-import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from "./browser-storage.js";
+import { readLastReveal, readStoredSession, storeJson } from "./browser-storage.js";
 
 /*
  * gamba — backend-connected browser client
@@ -12,8 +12,6 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
  * round settlement, crash point and fairness seeds.
  */
 (() => {
-  "use strict";
-
   const API_BASE = String(window.GAMBA_API_BASE || "").replace(/\/+$/, "");
   const SESSION_STORAGE_KEY = "gamba.backend-session.v1";
   const LAST_REVEAL_KEY = "gamba.last-reveal.v1";
@@ -27,9 +25,9 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
   const STATUS_FALLBACK_POLL_MS = 250;
   const API_REQUEST_TIMEOUT_MS = 12_000;
   const LOANS = {
-    444: { principal: 444, repayment: 533, rounds: 8, tier: "STARTER" },
-    888: { principal: 888, repayment: 1110, rounds: 6, tier: "STANDARD" },
-    1500: { principal: 1500, repayment: 2025, rounds: 4, tier: "HIGHER RISK" }
+    444: { repayment: 533, rounds: 8, tier: "STARTER" },
+    888: { repayment: 1110, rounds: 6, tier: "STANDARD" },
+    1500: { repayment: 2025, rounds: 4, tier: "HIGHER RISK" }
   };
 
   const elements = {
@@ -61,7 +59,6 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     loanCloseButton: document.getElementById("loan-close-button"),
     loanWarning: document.getElementById("loan-warning"),
     newGameButton: dialogs.elements.newGameButton,
-    fairnessEpoch: document.getElementById("fairness-epoch"),
     fairnessCommitment: document.getElementById("fairness-commitment"),
     fairnessClientSeed: document.getElementById("fairness-client-seed"),
     fairnessMessage: document.getElementById("fairness-message"),
@@ -88,7 +85,6 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     balance: STARTING_GOLD,
     activeBet: 0,
     multiplier: 1,
-    roundStartedAt: 0,
     serverTimeAnchor: null,
     performanceTimeAnchor: null,
     activeRound: null,
@@ -117,7 +113,6 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     activeLoans: [],
     loansTaken: {},
     loansRepaid: {},
-    history: [],
     profile: { stats: null, leaderboard: [] },
     roundNumber: 0,
     commitment: null,
@@ -208,7 +203,6 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
   }
 
   function renderFairness() {
-    elements.fairnessEpoch.textContent = "CURRENT SEED";
     elements.fairnessCommitment.textContent = game.commitment || "Waiting for server commitment…";
     elements.fairnessClientSeed.textContent = game.clientSeed || "Client seed not set";
     elements.copyCommitmentButton.disabled = !game.commitment;
@@ -217,8 +211,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       ? "No action needed to play. Verify previous rounds after a new game reveals their seed."
       : "Connecting to server…";
 
-    const savedReveal = game.lastReveal || loadSavedLastReveal();
-    game.lastReveal = savedReveal;
+    const savedReveal = game.lastReveal;
     if (savedReveal) {
       elements.lastRevealPanel.hidden = false;
       elements.lastRevealEpoch.textContent = `Seed batch ${savedReveal.epoch} · revealed`;
@@ -238,7 +231,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       commitment: revealed.commitment
     };
     try {
-      storeLastReveal(localStorage, LAST_REVEAL_KEY, game.lastReveal);
+      storeJson(localStorage, LAST_REVEAL_KEY, game.lastReveal);
     } catch { /* The server's fairness endpoint remains authoritative if browser storage is unavailable. */ }
     renderFairness();
   }
@@ -285,10 +278,9 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     game.activeLoans = Array.isArray(state.activeLoans) ? state.activeLoans : [];
     game.loansTaken = { ...(state.loansTaken || {}) };
     game.loansRepaid = getRepaidFlags(state);
-    game.history = Array.isArray(state.history) ? state.history : [];
     game.clientSeed = state.clientSeed || null;
     if (profile) applyProfile(profile);
-    renderHistory(game.history);
+    renderHistory(Array.isArray(state.history) ? state.history : []);
     updateUI();
 
     if (!updateModals) return;
@@ -430,10 +422,9 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
       cashoutKey: null
     };
     game.activeBet = Number(activeRound.stake);
-    game.roundStartedAt = Number(activeRound.startedAt);
     game.active = true;
     game.recoveredRound = Boolean(recovered);
-    game.multiplier = Math.min(MAX_MULTIPLIER, 1 + Math.max(0, (estimatedServerTime() - game.roundStartedAt) / 1000) * GROWTH_PER_SECOND);
+    game.multiplier = calculateVisibleMultiplier(estimatedServerTime(), game.activeRound.startedAt, GROWTH_PER_SECOND, MAX_MULTIPLIER);
     elements.multiplier.classList.add("live");
     elements.multiplier.classList.remove("busted");
     elements.meterTrack.classList.remove("busted");
@@ -566,7 +557,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     game.sessionId = created.sessionId;
     game.token = created.token;
     try {
-      storeSession(localStorage, SESSION_STORAGE_KEY, {
+      storeJson(localStorage, SESSION_STORAGE_KEY, {
         sessionId: game.sessionId,
         token: game.token
       });
@@ -682,7 +673,6 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     game.activeBet = response.round.stake;
     game.balance = response.state.balance;
     game.activeRound = { ...response.round, cashoutKey: pending.releaseRequested ? pending.cashoutKey : null };
-    game.roundStartedAt = Number(response.round.startedAt);
     game.active = true;
     game.recoveredRound = false;
     game.lastSettledRoundId = null;
@@ -743,7 +733,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
 
   async function finishFromServerResult(response, roundId) {
     if (!roundId || game.lastSettledRoundId === roundId || game.settlingRoundId === roundId) return;
-    let result = response.result || response.status;
+    const result = response.result || response.status;
     if (result === "running") return;
     game.settlingRoundId = roundId;
     try {
@@ -775,7 +765,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     elements.multiplier.classList.remove("live");
 
     applyState(response.state, response.profile, { updateModals: false });
-    const isBust = result === "busted" || result === "BUSTED";
+    const isBust = result === "busted";
     const multiplier = isBust
       ? (Number.isFinite(Number(crashPoint)) ? Number(crashPoint) : Math.max(1, Number(historyItem?.multiplier) || 1))
       : Number(response.multiplier ?? historyItem?.multiplier ?? MAX_MULTIPLIER);
@@ -1163,9 +1153,7 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     try {
       await initializeBackend();
       game.initializing = false;
-      game.ready = true;
       updateUI();
-      renderFairness();
     } catch (error) {
       game.initializing = false;
       game.ready = false;
