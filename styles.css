@@ -271,9 +271,6 @@ main { padding: 26px 0 28px; }
   background: linear-gradient(160deg, rgba(255, 255, 255, 0.22), transparent 42%), linear-gradient(112deg, #bd69ff 0%, #974eff 34%, #763ce7 66%, #df477f 100%);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55), inset 0 -4px 0 rgba(33, 8, 62, 0.28), 0 9px 25px rgba(115, 53, 207, 0.34), 0 0 26px rgba(221, 71, 131, 0.10);
   cursor: pointer;
-  -webkit-user-select: none;
-  user-select: none;
-  -webkit-touch-callout: none;
   -webkit-tap-highlight-color: transparent;
   -webkit-user-drag: none;
   touch-action: none;
@@ -325,7 +322,7 @@ main { padding: 26px 0 28px; }
 .hold-button:focus-visible { outline: 3px solid #ffffff; outline-offset: 4px; }
 .hold-button:disabled { cursor: not-allowed; opacity: 0.48; filter: saturate(0.45); transform: none; box-shadow: none; }
 .hold-button:disabled::after { display: none; }
-.hold-button-title { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; pointer-events: none; position: relative; z-index: 2; text-shadow: 0 1px 4px rgba(30, 5, 52, 0.4); font-size: 16px; font-weight: 820; letter-spacing: 0.065em; }
+.hold-button-title { pointer-events: none; position: relative; z-index: 2; text-shadow: 0 1px 4px rgba(30, 5, 52, 0.4); font-size: 16px; font-weight: 820; letter-spacing: 0.065em; }
 .game-panel-footer { display: flex; justify-content: space-between; gap: 12px; margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
 .game-panel-footer strong { color: var(--text); font-weight: 700; }
 
@@ -334,8 +331,7 @@ main { padding: 26px 0 28px; }
 .bet-panel, .loan-panel, .history-panel, .fairness-panel, .stats-panel, .leaderboard-panel { padding: 18px; }
 .panel-heading { margin-bottom: 16px; }
 .panel-heading h2 { margin: 0; color: var(--text); font-size: 16px; font-weight: 680; letter-spacing: -0.02em; }
-.heading-unit { color: var(--muted); font-size: 10px; white-space: nowrap; }
-.loan-status { color: var(--muted); font-size: 11px; }
+.heading-unit { font-size: 10px; white-space: nowrap; }
 .field-label { display: block; margin-bottom: 7px; color: var(--muted); font-size: 13px; font-weight: 600; }
 .bet-input-wrap { display: flex; align-items: center; gap: 8px; padding: 5px; border: 1px solid var(--line-strong); border-radius: 8px; background: #111023; }
 .bet-input-wrap:focus-within { border-color: var(--accent); }
@@ -414,7 +410,6 @@ main { padding: 26px 0 28px; }
 .fairness-panel .fairness-content > details { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
 .fairness-panel .fairness-content > details summary { color: var(--accent); font-size: 11px; font-weight: 700; cursor: pointer; }
 .fairness-panel .fairness-content > details.fairness-help summary { color: var(--muted); }
-.fairness-panel .fairness-content > details[hidden] { display: none; }
 .fairness-help p { margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 #fairness-epoch { max-width: 115px; overflow-wrap: anywhere; text-align: right; }
 
@@ -469,7 +464,6 @@ main { padding: 26px 0 28px; }
 .loan-option { display: flex; flex-direction: column; gap: 7px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 8px; text-align: left; background: #211d3a; cursor: pointer; }
 .loan-option:hover:not(:disabled) { border-color: rgba(189, 151, 255, 0.46); background: #302646; }
 .loan-option:disabled { opacity: 0.58; cursor: not-allowed; }
-.loan-option:focus-visible, .button-primary:focus-visible, .button-secondary:focus-visible, .modal-close:focus-visible, .quick-bets button:focus-visible, .max-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .loan-option-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .loan-option-top strong { font-size: 19px; font-weight: 700; }
 .loan-option-top small { color: var(--muted); font-size: 10px; letter-spacing: 0.04em; }
@@ -500,7 +494,7 @@ main { padding: 26px 0 28px; }
   .game-panel { order: 1; width: 100%; min-height: auto; padding: 22px 20px 17px; }
   .side-column { order: 2; width: 100%; display: flex; flex-direction: column; gap: 12px; }
   .left-column { order: 3; width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 12px; }
-  .insights-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; margin-top: 12px; }
+  .insights-layout { gap: 12px; margin-top: 12px; }
 }
 @media (max-width: 720px) {
   .topbar { min-height: 70px; gap: 10px; }
@@ -531,7 +525,6 @@ main { padding: 26px 0 28px; }
   .fairness-panel > summary.fairness-panel-summary { padding: 14px 15px; gap: 7px; }
   .fairness-panel .fairness-content { padding: 0 15px 14px; }
   .fairness-panel-summary .heading-unit { max-width: 85px; white-space: nowrap; font-size: 8px; }
-  .fairness-value { font-size: 10px; }
   .game-panel-footer { flex-direction: column; gap: 5px; }
 }
 @media (max-width: 390px) {
