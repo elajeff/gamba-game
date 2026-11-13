@@ -20,12 +20,15 @@ async function openGame(t, options = {}) {
   const page = await browser.newPage();
   t.after(async () => {
     server.gate?.resolve();
+    server.replayGate?.resolve();
     await page.close();
   });
   const server = {
     state: { ...initialState(), ...options.state }, round: null,
     startKeys: [], cashoutKeys: [],
     gate: options.holdStart ? Promise.withResolvers() : null,
+    replayGate: options.holdReplay ? Promise.withResolvers() : null,
+    replaying: Promise.withResolvers(),
     started: Promise.withResolvers()
   };
   server.snapshot = () => ({ state: { ...server.state, activeRound: server.round },
@@ -66,6 +69,10 @@ async function openGame(t, options = {}) {
       const response = { round: { ...server.round }, state: { ...server.state }, serverTime: Date.now() };
       server.started.resolve();
       if (options.failFirstStart && server.startKeys.length === 1) return reply({ error: "test_unavailable" }, 503);
+      if (server.startKeys.length === 2) {
+        server.replaying.resolve();
+        if (server.replayGate) await server.replayGate.promise;
+      }
       if (server.gate) await server.gate.promise;
       if (server.earlyRelease) return reply({ round: response.round, ...server.settle() });
       return reply(response);
@@ -132,4 +139,16 @@ test("loan dialogs keep background controls inert and Escape returns to the deci
   await page.keyboard.press("Escape");
   await page.keyboard.press("Escape");
   assert.equal(await page.locator("#bankrupt-modal").evaluate(dialog => dialog.matches(":modal")), true);
+});
+
+test("releasing while an uncertain start is being replayed still settles the round", { timeout: 15000 }, async t => {
+  const { page, server } = await openGame(t, { failFirstStart: true, holdReplay: true });
+  await pressHold(page);
+  await server.replaying.promise;
+  const released = page.waitForResponse("**/api/round/release-intent");
+  await page.keyboard.up("Space");
+  await released;
+  server.replayGate.resolve();
+  await expectSettled(page);
+  assert.equal(new Set(server.startKeys).size, 1);
 });
