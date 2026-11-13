@@ -463,6 +463,10 @@ main { padding: 26px 0 28px; }
 .button-secondary { color: var(--text); border-color: var(--line); background: #282341; }
 .button-secondary:hover:not(:disabled) { border-color: var(--line-strong); background: #342c50; }
 .button-primary:disabled, .button-secondary:disabled { opacity: 0.45; cursor: not-allowed; }
+#accept-defeat-button { border-color: rgba(255, 129, 153, 0.3); background: #3a1f30; }
+#accept-defeat-button:hover:not(:disabled) { border-color: rgba(255, 129, 153, 0.55); background: #4d2739; }
+#bank-loan-button { border-color: rgba(181, 238, 217, 0.3); background: #1c3530; }
+#bank-loan-button:hover:not(:disabled) { border-color: rgba(181, 238, 217, 0.55); background: #264a40; }
 .loan-modal-card { width: min(100%, 540px); }
 .modal-close { position: absolute; top: 13px; right: 13px; width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: transparent; font-size: 22px; line-height: 1; cursor: pointer; }
 .loan-options { display: grid; gap: 8px; margin-top: 20px; }
