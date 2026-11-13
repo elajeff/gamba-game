@@ -123,7 +123,6 @@ export function createGameRenderer({
       const tier = button.querySelector(".loan-tier");
       button.disabled = !canBorrow || taken || game.loanPending;
       tier.textContent = activeLoan ? "ACTIVE LOAN" : repaid ? "REPAID" : taken ? "USED THIS GAME" : loan.tier;
-      button.classList.toggle("loan-taken", taken);
     });
 
     Object.keys(loans).forEach((key) => {
