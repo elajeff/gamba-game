@@ -135,6 +135,7 @@ import { readLastReveal, readStoredSession, storeJson } from "./browser-storage.
     maxMultiplier: MAX_MULTIPLIER,
     getGame: () => game,
     formatGold,
+    formatSignedGold,
     hasUsedAllLoans
   });
   const { setMessage, setRoundStatus, renderHistory, renderProfile, updateLoanOptions, updateMultiplierDisplay, updateUI } = renderer;
@@ -159,19 +160,25 @@ import { readLastReveal, readStoredSession, storeJson } from "./browser-storage.
     return Math.floor(Number(amount) || 0).toLocaleString("en-US");
   }
 
+  function formatSignedGold(amount) {
+    const value = Number(amount) || 0;
+    return `${value >= 0 ? "+" : "−"}${formatGold(Math.abs(value))}`;
+  }
 
-  function newIdempotencyKey() {
-    if (window.crypto?.randomUUID) return window.crypto.randomUUID().replace(/-/g, "");
+  function randomHex() {
     const bytes = new Uint8Array(16);
     window.crypto.getRandomValues(bytes);
     return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
   }
 
+  function newIdempotencyKey() {
+    if (window.crypto?.randomUUID) return window.crypto.randomUUID().replace(/-/g, "");
+    return randomHex();
+  }
+
   function newClientSeed() {
     if (!window.crypto?.getRandomValues) throw new Error("This browser does not provide secure random generation.");
-    const bytes = new Uint8Array(16);
-    window.crypto.getRandomValues(bytes);
-    return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+    return randomHex();
   }
 
   function getBet() {
@@ -467,8 +474,7 @@ import { readLastReveal, readStoredSession, storeJson } from "./browser-storage.
       elements.multiplierCaption.textContent = `Last cash-out at x${game.multiplier.toFixed(2)}.`;
       elements.holdButtonTitle.textContent = "HOLD TO START";
       setRoundStatus("LAST ROUND SETTLED");
-      const net = Number(item.net) || 0;
-      setMessage(`Recovered session: last round paid ${formatGold(item.payout)} gold · net ${net >= 0 ? "+" : "−"}${formatGold(Math.abs(net))}.`, "success");
+      setMessage(`Recovered session: last round paid ${formatGold(item.payout)} gold · net ${formatSignedGold(item.net)}.`, "success");
     }
   }
 
@@ -786,8 +792,8 @@ import { readLastReveal, readStoredSession, storeJson } from "./browser-storage.
       elements.holdButtonTitle.textContent = "HOLD TO START";
       setRoundStatus("CASHED OUT");
       const payout = Number(response.payout ?? historyItem?.payout ?? 0);
-      const net = Number(response.net ?? historyItem?.net ?? 0);
-      setMessage(`Payout ${formatGold(payout)} gold · net ${net >= 0 ? "+" : "−"}${formatGold(Math.abs(net))}.`, "success");
+      const net = response.net ?? historyItem?.net ?? 0;
+      setMessage(`Payout ${formatGold(payout)} gold · net ${formatSignedGold(net)}.`, "success");
     }
 
     if (response.state.gameOver) {

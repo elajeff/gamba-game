@@ -10,9 +10,13 @@ function hexToBytes(hex) {
   return bytes;
 }
 
+function bytesToHex(bytes) {
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 async function sha256HexUtf8(text) {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
-  return [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return bytesToHex(digest);
 }
 
 export async function verifyFairnessHistory(api, onProgress = () => {}) {
@@ -77,7 +81,7 @@ export async function verifyFairnessHistory(api, onProgress = () => {}) {
     }
     const serverKey = await crypto.subtle.importKey("raw", hexToBytes(seedRow.revealed_seed), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
     const digest = new Uint8Array(await crypto.subtle.sign("HMAC", serverKey, new TextEncoder().encode(`${round.client_seed}:${round.nonce}`)));
-    const first13 = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 13);
+    const first13 = bytesToHex(digest).slice(0, 13);
     const random52 = BigInt(`0x${first13}`);
     const denominator = 1n << 52n;
     const edge = Number(round.edge_percent ?? first.houseEdgePercent ?? 1);
