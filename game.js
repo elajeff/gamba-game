@@ -1268,15 +1268,13 @@ import { readLastReveal, readStoredSession, storeLastReveal, storeSession } from
     }
   });
   elements.verifyFairnessButton.addEventListener("click", () => void verifyRevealedFairness());
-  elements.loanModal.addEventListener("cancel", event => {
-    event.preventDefault();
-    closeLoanModal();
-  });
-  for (const dialog of [elements.bankruptModal, elements.gameoverModal]) {
-    // These dialogs require a game decision; Escape must not bypass it.
-    dialog.addEventListener("cancel", event => event.preventDefault());
-  }
   document.addEventListener("keydown", (event) => {
+    // These dialogs need a game decision. Chrome lets a page cancel a dialog's "cancel" event only
+    // once per user activation, so blocking it there would let a second Escape through.
+    if (event.key === "Escape" && document.querySelector(".game-dialog:modal")) {
+      event.preventDefault();
+      if (elements.loanModal.matches(":modal")) closeLoanModal();
+    }
     // A modal can take focus while the hold key is still down, so only a fresh press counts.
     if (event.repeat && (event.key === "Enter" || event.key === " ") && event.target.closest(".game-dialog")) event.preventDefault();
   });
