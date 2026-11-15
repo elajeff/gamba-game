@@ -11,1167 +11,1161 @@ import { readLastReveal, readStoredSession, storeJson } from "./browser-storage.
  * The browser renders the game. The Cloudflare Worker owns balance, loans,
  * round settlement, crash point and fairness seeds.
  */
-(() => {
-  const API_BASE = String(window.GAMBA_API_BASE || "").replace(/\/+$/, "");
-  const SESSION_STORAGE_KEY = "gamba.backend-session.v1";
-  const LAST_REVEAL_KEY = "gamba.last-reveal.v1";
-  const STARTING_GOLD = 888;
-  const GROWTH_PER_SECOND = 0.8;
-  const MAX_MULTIPLIER = 10;
-  // Lower request traffic; the server alarm settles rounds even when no browser is connected.
-  const STATUS_POLL_MS = 1000;
-  // If push events are not connected, poll more frequently so a short crash is not hidden
-  // for a full second. Keep the slower watchdog while the WebSocket is healthy.
-  const STATUS_FALLBACK_POLL_MS = 250;
-  const API_REQUEST_TIMEOUT_MS = 12_000;
-  const LOANS = {
-    444: { repayment: 533, rounds: 8, tier: "STARTER" },
-    888: { repayment: 1110, rounds: 6, tier: "STANDARD" },
-    1500: { repayment: 2025, rounds: 4, tier: "HIGHER RISK" }
+const API_BASE = String(window.GAMBA_API_BASE || "").replace(/\/+$/, "");
+const SESSION_STORAGE_KEY = "gamba.backend-session.v1";
+const LAST_REVEAL_KEY = "gamba.last-reveal.v1";
+const STARTING_GOLD = 888;
+const GROWTH_PER_SECOND = 0.8;
+const MAX_MULTIPLIER = 10;
+// Lower request traffic; the server alarm settles rounds even when no browser is connected.
+const STATUS_POLL_MS = 1000;
+// If push events are not connected, poll more frequently so a short crash is not hidden
+// for a full second. Keep the slower watchdog while the WebSocket is healthy.
+const STATUS_FALLBACK_POLL_MS = 250;
+const API_REQUEST_TIMEOUT_MS = 12_000;
+const LOANS = {
+  444: { repayment: 533, rounds: 8, tier: "STARTER" },
+  888: { repayment: 1110, rounds: 6, tier: "STANDARD" },
+  1500: { repayment: 2025, rounds: 4, tier: "HIGHER RISK" }
+};
+
+const elements = {
+  balance: document.getElementById("balance"),
+  betInput: document.getElementById("bet-input"),
+  betNote: document.getElementById("bet-note"),
+  maxButton: document.getElementById("max-button"),
+  multiplier: document.getElementById("multiplier"),
+  multiplierCaption: document.getElementById("multiplier-caption"),
+  meterTrack: document.getElementById("meter-track"),
+  meterFill: document.getElementById("meter-fill"),
+  roundStatus: document.getElementById("round-status"),
+  roundMessage: document.getElementById("round-message"),
+  holdButton: document.getElementById("hold-button"),
+  holdButtonTitle: document.getElementById("hold-button-title"),
+  loanStatus: document.getElementById("loan-status"),
+  loanDescription: document.getElementById("loan-description"),
+  loanRounds: document.getElementById("loan-rounds"),
+  historyList: document.getElementById("history-list"),
+  statRounds: document.getElementById("stat-rounds"),
+  statWinRate: document.getElementById("stat-win-rate"),
+  statNet: document.getElementById("stat-net-result"),
+  statBestMultiplier: document.getElementById("stat-best-multiplier"),
+  statStaked: document.getElementById("stat-total-staked"),
+  statPayout: document.getElementById("stat-total-payout"),
+  leaderboardList: document.getElementById("leaderboard-list"),
+  acceptDefeatButton: dialogs.elements.acceptDefeatButton,
+  bankLoanButton: dialogs.elements.bankLoanButton,
+  loanCloseButton: document.getElementById("loan-close-button"),
+  loanWarning: document.getElementById("loan-warning"),
+  newGameButton: dialogs.elements.newGameButton,
+  fairnessCommitment: document.getElementById("fairness-commitment"),
+  fairnessClientSeed: document.getElementById("fairness-client-seed"),
+  fairnessMessage: document.getElementById("fairness-message"),
+  copyCommitmentButton: document.getElementById("copy-commitment-button"),
+  lastRevealPanel: document.getElementById("last-reveal-panel"),
+  lastRevealEpoch: document.getElementById("last-reveal-epoch"),
+  lastRevealSeed: document.getElementById("last-reveal-seed"),
+  lastRevealCommitment: document.getElementById("last-reveal-commitment"),
+  verifyFairnessButton: document.getElementById("verify-fairness-button"),
+  verifyFairnessStatus: document.getElementById("verify-fairness-status")
+};
+const loanOptionButtons = [...document.querySelectorAll(".loan-option")];
+const quickBetButtons = [...document.querySelectorAll(".quick-bets button")];
+const loanStatusElements = Object.fromEntries(Object.keys(LOANS).map((key) => [key, {
+  status: document.getElementById(`loan-${key}-state`),
+  details: document.querySelector(`[data-loan-status="${key}"] .loan-availability-main small`)
+}]));
+
+const game = {
+  ready: false,
+  initializing: true,
+  sessionId: null,
+  token: null,
+  balance: STARTING_GOLD,
+  activeBet: 0,
+  multiplier: 1,
+  serverTimeAnchor: null,
+  performanceTimeAnchor: null,
+  activeRound: null,
+  active: false,
+  recoveredRound: false,
+  pendingStart: null,
+  cashoutPending: false,
+  loanPending: false,
+  resetPending: false,
+  endPending: false,
+  holdSource: null,
+  activePointerId: null,
+  keyboardCode: null,
+  animationFrameId: null,
+  pollTimerId: null,
+  pollPending: false,
+  pollAbortController: null,
+  statusFailureCount: 0,
+  eventSocket: null,
+  eventReconnectTimer: null,
+  eventReconnectAttempts: 0,
+  settlingRoundId: null,
+  lastSettledRoundId: null,
+  gameOver: false,
+  waitingForLoan: false,
+  activeLoans: [],
+  loansTaken: {},
+  loansRepaid: {},
+  profile: { stats: null, leaderboard: [] },
+  roundNumber: 0,
+  commitment: null,
+  clientSeed: null,
+  lastReveal: null
+};
+
+const api = createApiClient({
+  baseUrl: API_BASE,
+  getToken: () => game.token,
+  timeoutMs: API_REQUEST_TIMEOUT_MS
+});
+
+const renderer = createGameRenderer({
+  elements,
+  loanOptionButtons,
+  quickBetButtons,
+  loanStatusElements,
+  loans: LOANS,
+  maxMultiplier: MAX_MULTIPLIER,
+  getGame: () => game,
+  formatGold,
+  formatSignedGold,
+  hasUsedAllLoans
+});
+const { setMessage, setRoundStatus, renderHistory, renderProfile, updateLoanOptions, updateMultiplierDisplay, updateUI } = renderer;
+
+function loadStoredSession() {
+  try {
+    return readStoredSession(localStorage, SESSION_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function loadSavedLastReveal() {
+  try {
+    return readLastReveal(localStorage, LAST_REVEAL_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function formatGold(amount) {
+  return Math.floor(Number(amount) || 0).toLocaleString("en-US");
+}
+
+function formatSignedGold(amount) {
+  const value = Number(amount) || 0;
+  return `${value >= 0 ? "+" : "−"}${formatGold(Math.abs(value))}`;
+}
+
+function randomHex() {
+  const bytes = new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function newIdempotencyKey() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID().replace(/-/g, "");
+  return randomHex();
+}
+
+function newClientSeed() {
+  if (!window.crypto?.getRandomValues) throw new Error("This browser does not provide secure random generation.");
+  return randomHex();
+}
+
+function getBet() {
+  const value = Number(elements.betInput.value);
+  if (!Number.isSafeInteger(value) || value < 1 || value > game.balance) return null;
+  return value;
+}
+
+
+function applyProfile(profile) {
+  if (!profile || typeof profile !== "object") return;
+  game.profile = {
+    stats: profile.stats || game.profile?.stats || null,
+    leaderboard: Array.isArray(profile.leaderboard) ? profile.leaderboard : (game.profile?.leaderboard || [])
   };
+  renderProfile();
+}
 
-  const elements = {
-    balance: document.getElementById("balance"),
-    betInput: document.getElementById("bet-input"),
-    betNote: document.getElementById("bet-note"),
-    maxButton: document.getElementById("max-button"),
-    multiplier: document.getElementById("multiplier"),
-    multiplierCaption: document.getElementById("multiplier-caption"),
-    meterTrack: document.getElementById("meter-track"),
-    meterFill: document.getElementById("meter-fill"),
-    roundStatus: document.getElementById("round-status"),
-    roundMessage: document.getElementById("round-message"),
-    holdButton: document.getElementById("hold-button"),
-    holdButtonTitle: document.getElementById("hold-button-title"),
-    loanStatus: document.getElementById("loan-status"),
-    loanDescription: document.getElementById("loan-description"),
-    loanRounds: document.getElementById("loan-rounds"),
-    historyList: document.getElementById("history-list"),
-    statRounds: document.getElementById("stat-rounds"),
-    statWinRate: document.getElementById("stat-win-rate"),
-    statNet: document.getElementById("stat-net-result"),
-    statBestMultiplier: document.getElementById("stat-best-multiplier"),
-    statStaked: document.getElementById("stat-total-staked"),
-    statPayout: document.getElementById("stat-total-payout"),
-    leaderboardList: document.getElementById("leaderboard-list"),
-    acceptDefeatButton: dialogs.elements.acceptDefeatButton,
-    bankLoanButton: dialogs.elements.bankLoanButton,
-    loanCloseButton: document.getElementById("loan-close-button"),
-    loanWarning: document.getElementById("loan-warning"),
-    newGameButton: dialogs.elements.newGameButton,
-    fairnessCommitment: document.getElementById("fairness-commitment"),
-    fairnessClientSeed: document.getElementById("fairness-client-seed"),
-    fairnessMessage: document.getElementById("fairness-message"),
-    copyCommitmentButton: document.getElementById("copy-commitment-button"),
-    lastRevealPanel: document.getElementById("last-reveal-panel"),
-    lastRevealEpoch: document.getElementById("last-reveal-epoch"),
-    lastRevealSeed: document.getElementById("last-reveal-seed"),
-    lastRevealCommitment: document.getElementById("last-reveal-commitment"),
-    verifyFairnessButton: document.getElementById("verify-fairness-button"),
-    verifyFairnessStatus: document.getElementById("verify-fairness-status")
+function hasUsedAllLoans(flags = game.loansTaken) {
+  return Object.keys(LOANS).every((principal) => Boolean(flags?.[principal]));
+}
+
+function getRepaidFlags(state) {
+  const flags = { ...(state?.loansRepaid || {}) };
+  for (const item of state?.history || []) {
+    for (const repayment of item.repayments || []) flags[repayment.principal] = true;
+  }
+  return flags;
+}
+
+function renderFairness() {
+  elements.fairnessCommitment.textContent = game.commitment || "Waiting for server commitment…";
+  elements.fairnessClientSeed.textContent = game.clientSeed || "Client seed not set";
+  elements.copyCommitmentButton.disabled = !game.commitment;
+  elements.verifyFairnessButton.disabled = !game.ready;
+  elements.fairnessMessage.textContent = game.commitment && game.clientSeed
+    ? "No action needed to play. Verify previous rounds after a new game reveals their seed."
+    : "Connecting to server…";
+
+  const savedReveal = game.lastReveal;
+  if (savedReveal) {
+    elements.lastRevealPanel.hidden = false;
+    elements.lastRevealEpoch.textContent = `Seed batch ${savedReveal.epoch} · revealed`;
+    elements.lastRevealSeed.textContent = savedReveal.serverSeed;
+    elements.lastRevealCommitment.textContent = savedReveal.commitment;
+  } else {
+    elements.lastRevealPanel.hidden = true;
+    elements.lastRevealSeed.textContent = "";
+    elements.lastRevealCommitment.textContent = "";
+  }
+}
+
+function saveLastReveal(revealed) {
+  game.lastReveal = {
+    epoch: revealed.epoch,
+    serverSeed: revealed.serverSeed,
+    commitment: revealed.commitment
   };
-  const loanOptionButtons = [...document.querySelectorAll(".loan-option")];
-  const quickBetButtons = [...document.querySelectorAll(".quick-bets button")];
-  const loanStatusElements = Object.fromEntries(Object.keys(LOANS).map((key) => [key, {
-    status: document.getElementById(`loan-${key}-state`),
-    details: document.querySelector(`[data-loan-status="${key}"] .loan-availability-main small`)
-  }]));
+  try {
+    storeJson(localStorage, LAST_REVEAL_KEY, game.lastReveal);
+  } catch { /* The server's fairness endpoint remains authoritative if browser storage is unavailable. */ }
+  renderFairness();
+}
 
-  const game = {
-    ready: false,
-    initializing: true,
-    sessionId: null,
-    token: null,
-    balance: STARTING_GOLD,
-    activeBet: 0,
-    multiplier: 1,
-    serverTimeAnchor: null,
-    performanceTimeAnchor: null,
-    activeRound: null,
-    active: false,
-    recoveredRound: false,
-    pendingStart: null,
-    cashoutPending: false,
-    loanPending: false,
-    resetPending: false,
-    endPending: false,
-    holdSource: null,
-    activePointerId: null,
-    keyboardCode: null,
-    animationFrameId: null,
-    pollTimerId: null,
-    pollPending: false,
-    pollAbortController: null,
-    statusFailureCount: 0,
-    eventSocket: null,
-    eventReconnectTimer: null,
-    eventReconnectAttempts: 0,
-    settlingRoundId: null,
-    lastSettledRoundId: null,
-    gameOver: false,
-    waitingForLoan: false,
-    activeLoans: [],
-    loansTaken: {},
-    loansRepaid: {},
-    profile: { stats: null, leaderboard: [] },
-    roundNumber: 0,
-    commitment: null,
-    clientSeed: null,
-    lastReveal: null
-  };
 
-  const api = createApiClient({
-    baseUrl: API_BASE,
-    getToken: () => game.token,
-    timeoutMs: API_REQUEST_TIMEOUT_MS
-  });
+function estimatedServerTime() {
+  return estimateServerTime(
+    game.serverTimeAnchor,
+    game.performanceTimeAnchor,
+    performance.now(),
+    Date.now()
+  );
+}
 
-  const renderer = createGameRenderer({
-    elements,
-    loanOptionButtons,
-    quickBetButtons,
-    loanStatusElements,
-    loans: LOANS,
-    maxMultiplier: MAX_MULTIPLIER,
-    getGame: () => game,
-    formatGold,
-    formatSignedGold,
-    hasUsedAllLoans
-  });
-  const { setMessage, setRoundStatus, renderHistory, renderProfile, updateLoanOptions, updateMultiplierDisplay, updateUI } = renderer;
+function syncServerClock(serverTime) {
+  const receivedAt = performance.now();
+  const anchor = nextServerTimeAnchor(
+    game.serverTimeAnchor,
+    game.performanceTimeAnchor,
+    serverTime,
+    receivedAt
+  );
+  if (!anchor) return;
+  // Keep the visible clock from rewinding when a server response arrives late.
+  game.serverTimeAnchor = anchor.serverTimeAnchor;
+  game.performanceTimeAnchor = anchor.performanceTimeAnchor;
+}
 
-  function loadStoredSession() {
-    try {
-      return readStoredSession(localStorage, SESSION_STORAGE_KEY);
-    } catch {
-      return null;
-    }
+
+function getVisibleMultiplierCents() {
+  // Read the exact value already painted to the player, not a newer unrendered frame.
+  const match = /^x(\d+(?:\.\d{2})?)$/.exec(elements.multiplier.textContent.trim());
+  const visibleMultiplier = match ? Number(match[1]) : game.multiplier;
+  return Math.max(100, Math.min(MAX_MULTIPLIER * 100, Math.round(visibleMultiplier * 100)));
+}
+
+
+function applyState(state, profile = null, { updateModals = true } = {}) {
+  if (!state) throw new Error("Backend returned no game state.");
+  game.balance = Number(state.balance);
+  game.roundNumber = Number(state.roundNumber) || 0;
+  game.gameOver = Boolean(state.gameOver);
+  game.waitingForLoan = Boolean(state.waitingForLoan);
+  game.activeLoans = Array.isArray(state.activeLoans) ? state.activeLoans : [];
+  game.loansTaken = { ...(state.loansTaken || {}) };
+  game.loansRepaid = getRepaidFlags(state);
+  game.clientSeed = state.clientSeed || null;
+  if (profile) applyProfile(profile);
+  renderHistory(Array.isArray(state.history) ? state.history : []);
+  updateUI();
+
+  if (!updateModals) return;
+  if (game.gameOver && !game.active) {
+    showGameOver("GAME OVER", "This game has ended. Start a new game to begin another seed batch.", "Game over");
+  } else if (game.waitingForLoan && game.balance <= 0 && !game.active) {
+    showBankruptcyPrompt();
+  } else if (!game.waitingForLoan) {
+    dialogs.closeAll();
   }
+}
 
-  function loadSavedLastReveal() {
-    try {
-      return readLastReveal(localStorage, LAST_REVEAL_KEY);
-    } catch {
-      return null;
-    }
+function setHoldPressed(pressed) {
+  elements.holdButton.classList.toggle("is-holding", pressed);
+  elements.holdButton.setAttribute("aria-pressed", String(pressed));
+}
+
+function takeHold(source, identifier) {
+  game.holdSource = source;
+  game.activePointerId = source === "pointer" ? identifier : null;
+  game.keyboardCode = source === "keyboard" ? identifier : null;
+}
+
+function clearHoldState() {
+  game.holdSource = null;
+  game.activePointerId = null;
+  game.keyboardCode = null;
+  setHoldPressed(false);
+}
+
+function resetMultiplierBoard() {
+  game.multiplier = 1;
+  elements.multiplier.classList.remove("busted");
+  updateMultiplierDisplay();
+}
+
+function stopAnimation() {
+  if (game.animationFrameId !== null) cancelAnimationFrame(game.animationFrameId);
+  game.animationFrameId = null;
+}
+
+function stopStatusPolling() {
+  if (game.pollTimerId !== null) clearTimeout(game.pollTimerId);
+  game.pollTimerId = null;
+}
+
+function cancelStatusPollingForCashout() {
+  stopStatusPolling();
+  // Don't let a background status GET compete with the user's release request.
+  // It is read-only; aborting it cannot cancel or change the server-side round.
+  if (game.pollAbortController) game.pollAbortController.abort();
+}
+
+function scheduleAnimation() {
+  if (game.active && game.activeRound && !game.cashoutPending && game.animationFrameId === null) {
+    game.animationFrameId = requestAnimationFrame(updateRoundFrame);
   }
+}
 
-  function formatGold(amount) {
-    return Math.floor(Number(amount) || 0).toLocaleString("en-US");
-  }
+function updateRoundFrame() {
+  game.animationFrameId = null;
+  if (!game.active || !game.activeRound || game.cashoutPending) return;
+  game.multiplier = calculateVisibleMultiplier(
+    estimatedServerTime(),
+    game.activeRound.startedAt,
+    GROWTH_PER_SECOND,
+    MAX_MULTIPLIER
+  );
+  // This animation is cosmetic. Only the server decides if a cash-out beats the crash.
+  updateMultiplierDisplay();
+  scheduleAnimation();
+}
 
-  function formatSignedGold(amount) {
-    const value = Number(amount) || 0;
-    return `${value >= 0 ? "+" : "−"}${formatGold(Math.abs(value))}`;
-  }
-
-  function randomHex() {
-    const bytes = new Uint8Array(16);
-    window.crypto.getRandomValues(bytes);
-    return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
-  }
-
-  function newIdempotencyKey() {
-    if (window.crypto?.randomUUID) return window.crypto.randomUUID().replace(/-/g, "");
-    return randomHex();
-  }
-
-  function newClientSeed() {
-    if (!window.crypto?.getRandomValues) throw new Error("This browser does not provide secure random generation.");
-    return randomHex();
-  }
-
-  function getBet() {
-    const value = Number(elements.betInput.value);
-    if (!Number.isSafeInteger(value) || value < 1 || value > game.balance) return null;
-    return value;
-  }
-
-
-  function applyProfile(profile) {
-    if (!profile || typeof profile !== "object") return;
-    game.profile = {
-      stats: profile.stats || game.profile?.stats || null,
-      leaderboard: Array.isArray(profile.leaderboard) ? profile.leaderboard : (game.profile?.leaderboard || [])
-    };
-    renderProfile();
-  }
-
-  function hasUsedAllLoans(flags = game.loansTaken) {
-    return Object.keys(LOANS).every((principal) => Boolean(flags?.[principal]));
-  }
-
-  function getRepaidFlags(state) {
-    const flags = { ...(state?.loansRepaid || {}) };
-    for (const item of state?.history || []) {
-      for (const repayment of item.repayments || []) flags[repayment.principal] = true;
-    }
-    return flags;
-  }
-
-  function renderFairness() {
-    elements.fairnessCommitment.textContent = game.commitment || "Waiting for server commitment…";
-    elements.fairnessClientSeed.textContent = game.clientSeed || "Client seed not set";
-    elements.copyCommitmentButton.disabled = !game.commitment;
-    elements.verifyFairnessButton.disabled = !game.ready;
-    elements.fairnessMessage.textContent = game.commitment && game.clientSeed
-      ? "No action needed to play. Verify previous rounds after a new game reveals their seed."
-      : "Connecting to server…";
-
-    const savedReveal = game.lastReveal;
-    if (savedReveal) {
-      elements.lastRevealPanel.hidden = false;
-      elements.lastRevealEpoch.textContent = `Seed batch ${savedReveal.epoch} · revealed`;
-      elements.lastRevealSeed.textContent = savedReveal.serverSeed;
-      elements.lastRevealCommitment.textContent = savedReveal.commitment;
-    } else {
-      elements.lastRevealPanel.hidden = true;
-      elements.lastRevealSeed.textContent = "";
-      elements.lastRevealCommitment.textContent = "";
-    }
-  }
-
-  function saveLastReveal(revealed) {
-    game.lastReveal = {
-      epoch: revealed.epoch,
-      serverSeed: revealed.serverSeed,
-      commitment: revealed.commitment
-    };
-    try {
-      storeJson(localStorage, LAST_REVEAL_KEY, game.lastReveal);
-    } catch { /* The server's fairness endpoint remains authoritative if browser storage is unavailable. */ }
-    renderFairness();
-  }
-
-
-  function estimatedServerTime() {
-    return estimateServerTime(
-      game.serverTimeAnchor,
-      game.performanceTimeAnchor,
-      performance.now(),
-      Date.now()
-    );
-  }
-
-  function syncServerClock(serverTime) {
-    const receivedAt = performance.now();
-    const anchor = nextServerTimeAnchor(
-      game.serverTimeAnchor,
-      game.performanceTimeAnchor,
-      serverTime,
-      receivedAt
-    );
-    if (!anchor) return;
-    // Keep the visible clock from rewinding when a server response arrives late.
-    game.serverTimeAnchor = anchor.serverTimeAnchor;
-    game.performanceTimeAnchor = anchor.performanceTimeAnchor;
-  }
-
-
-  function getVisibleMultiplierCents() {
-    // Read the exact value already painted to the player, not a newer unrendered frame.
-    const match = /^x(\d+(?:\.\d{2})?)$/.exec(elements.multiplier.textContent.trim());
-    const visibleMultiplier = match ? Number(match[1]) : game.multiplier;
-    return Math.max(100, Math.min(MAX_MULTIPLIER * 100, Math.round(visibleMultiplier * 100)));
-  }
-
-
-  function applyState(state, profile = null, { updateModals = true } = {}) {
-    if (!state) throw new Error("Backend returned no game state.");
-    game.balance = Number(state.balance);
-    game.roundNumber = Number(state.roundNumber) || 0;
-    game.gameOver = Boolean(state.gameOver);
-    game.waitingForLoan = Boolean(state.waitingForLoan);
-    game.activeLoans = Array.isArray(state.activeLoans) ? state.activeLoans : [];
-    game.loansTaken = { ...(state.loansTaken || {}) };
-    game.loansRepaid = getRepaidFlags(state);
-    game.clientSeed = state.clientSeed || null;
-    if (profile) applyProfile(profile);
-    renderHistory(Array.isArray(state.history) ? state.history : []);
-    updateUI();
-
-    if (!updateModals) return;
-    if (game.gameOver && !game.active) {
-      showGameOver("GAME OVER", "This game has ended. Start a new game to begin another seed batch.", "Game over");
-    } else if (game.waitingForLoan && game.balance <= 0 && !game.active) {
-      showBankruptcyPrompt();
-    } else if (!game.waitingForLoan) {
-      dialogs.closeAll();
-    }
-  }
-
-  function setHoldPressed(pressed) {
-    elements.holdButton.classList.toggle("is-holding", pressed);
-    elements.holdButton.setAttribute("aria-pressed", String(pressed));
-  }
-
-  function takeHold(source, identifier) {
-    game.holdSource = source;
-    game.activePointerId = source === "pointer" ? identifier : null;
-    game.keyboardCode = source === "keyboard" ? identifier : null;
-  }
-
-  function clearHoldState() {
-    game.holdSource = null;
-    game.activePointerId = null;
-    game.keyboardCode = null;
-    setHoldPressed(false);
-  }
-
-  function resetMultiplierBoard() {
-    game.multiplier = 1;
-    elements.multiplier.classList.remove("busted");
-    updateMultiplierDisplay();
-  }
-
-  function stopAnimation() {
-    if (game.animationFrameId !== null) cancelAnimationFrame(game.animationFrameId);
-    game.animationFrameId = null;
-  }
-
-  function stopStatusPolling() {
-    if (game.pollTimerId !== null) clearTimeout(game.pollTimerId);
+function scheduleStatusPoll() {
+  stopStatusPolling();
+  if (!game.active || !game.activeRound || document.hidden || game.cashoutPending) return;
+  const pushConnected = game.eventSocket?.readyState === WebSocket.OPEN;
+  const baseDelay = pushConnected ? STATUS_POLL_MS : STATUS_FALLBACK_POLL_MS;
+  const retryDelay = game.statusFailureCount > 0
+    ? Math.min(30_000, baseDelay * (2 ** Math.min(game.statusFailureCount, 5)))
+    : baseDelay;
+  game.pollTimerId = setTimeout(async () => {
     game.pollTimerId = null;
-  }
+    await pollRoundStatus();
+    if (game.active) scheduleStatusPoll();
+  }, retryDelay);
+}
 
-  function cancelStatusPollingForCashout() {
-    stopStatusPolling();
-    // Don't let a background status GET compete with the user's release request.
-    // It is read-only; aborting it cannot cancel or change the server-side round.
-    if (game.pollAbortController) game.pollAbortController.abort();
-  }
-
-  function scheduleAnimation() {
-    if (game.active && game.activeRound && !game.cashoutPending && game.animationFrameId === null) {
-      game.animationFrameId = requestAnimationFrame(updateRoundFrame);
+async function pollRoundStatus() {
+  if (!game.active || !game.activeRound || game.pollPending || game.cashoutPending) return;
+  game.pollPending = true;
+  const roundId = game.activeRound.id;
+  const pollController = new AbortController();
+  game.pollAbortController = pollController;
+  try {
+    const result = await api(`/api/round/status?id=${encodeURIComponent(roundId)}`, { signal: pollController.signal });
+    game.statusFailureCount = 0;
+    if (result.status === "running") {
+      // Estimate server clock offset for a smoother display; only server responses settle a round.
+      syncServerClock(result.serverTime);
+      if (!game.cashoutPending) scheduleAnimation();
+      return;
     }
+    await finishFromServerResult(result, roundId);
+  } catch (error) {
+    // Cash-out deliberately aborts a redundant status request. Don't surface that as a network failure.
+    if (game.cashoutPending || pollController.signal.aborted) return;
+    game.statusFailureCount = Math.min(game.statusFailureCount + 1, 5);
+    const retrySeconds = Math.min(30, (STATUS_POLL_MS * (2 ** game.statusFailureCount)) / 1000);
+    setMessage(`Connection interrupted. Your round remains server-controlled. Retrying status in about ${retrySeconds}s. ${error.message}`, "danger");
+  } finally {
+    if (game.pollAbortController === pollController) game.pollAbortController = null;
+    game.pollPending = false;
   }
+}
 
-  function updateRoundFrame() {
-    game.animationFrameId = null;
-    if (!game.active || !game.activeRound || game.cashoutPending) return;
-    game.multiplier = calculateVisibleMultiplier(
-      estimatedServerTime(),
-      game.activeRound.startedAt,
-      GROWTH_PER_SECOND,
-      MAX_MULTIPLIER
-    );
-    // This animation is cosmetic. Only the server decides if a cash-out beats the crash.
-    updateMultiplierDisplay();
-    scheduleAnimation();
+async function registerClientSeed() {
+  if (game.clientSeed) return;
+  const seed = newClientSeed();
+  // Commitment has already been received from /api/session or /api/state.
+  const result = await api("/api/client-seed", { method: "POST", body: { clientSeed: seed }, idempotencyKey: newIdempotencyKey() });
+  game.clientSeed = result.clientSeed;
+  if (result.commitment) game.commitment = result.commitment;
+  renderFairness();
+}
+
+function updateCommitment(snapshot) {
+  if (snapshot?.commitment) game.commitment = snapshot.commitment;
+  renderFairness();
+}
+
+function activateExistingRound(activeRound, recovered = false) {
+  if (!activeRound?.id) return;
+  game.activeRound = {
+    id: activeRound.id,
+    stake: Number(activeRound.stake),
+    startedAt: Number(activeRound.startedAt),
+    commitment: activeRound.commitment || game.commitment,
+    cashoutKey: null
+  };
+  game.activeBet = Number(activeRound.stake);
+  game.active = true;
+  game.recoveredRound = Boolean(recovered);
+  game.multiplier = calculateVisibleMultiplier(estimatedServerTime(), game.activeRound.startedAt, GROWTH_PER_SECOND, MAX_MULTIPLIER);
+  elements.multiplier.classList.add("live");
+  elements.multiplier.classList.remove("busted");
+  elements.meterTrack.classList.remove("busted");
+  elements.holdButtonTitle.textContent = recovered ? "ROUND RECOVERED" : "RELEASE TO CASH OUT";
+  elements.multiplierCaption.textContent = recovered
+    ? "This round was interrupted. Its committed result will settle automatically; cash-out is disabled after recovery."
+    : "Release to cash out at the current multiplier.";
+  setRoundStatus("RUNNING", "live");
+  setMessage(recovered
+    ? "Recovered an interrupted round. To prevent a delayed cash-out advantage, the server will settle it at its committed crash or x10 cap."
+    : `Bet placed: ${formatGold(game.activeBet)} gold.`, recovered ? "danger" : "success");
+  setHoldPressed(!recovered);
+  scheduleAnimation();
+  scheduleStatusPoll();
+  updateUI();
+  // A recovered round had no continuous client-side hold. Do not allow a retrospective cash-out;
+  // the Durable Object alarm settles it at the committed crash or x10 cap. The status poll only
+  // refreshes the displayed result and does not change the outcome.
+}
+
+function showRecoveredLastResult(state) {
+  const item = Array.isArray(state?.history) ? state.history.at(-1) : null;
+  if (!item) {
+    setMessage("Connected to the game server. Ready to play.");
+    return;
   }
-
-  function scheduleStatusPoll() {
-    stopStatusPolling();
-    if (!game.active || !game.activeRound || document.hidden || game.cashoutPending) return;
-    const pushConnected = game.eventSocket?.readyState === WebSocket.OPEN;
-    const baseDelay = pushConnected ? STATUS_POLL_MS : STATUS_FALLBACK_POLL_MS;
-    const retryDelay = game.statusFailureCount > 0
-      ? Math.min(30_000, baseDelay * (2 ** Math.min(game.statusFailureCount, 5)))
-      : baseDelay;
-    game.pollTimerId = setTimeout(async () => {
-      game.pollTimerId = null;
-      await pollRoundStatus();
-      if (game.active) scheduleStatusPoll();
-    }, retryDelay);
-  }
-
-  async function pollRoundStatus() {
-    if (!game.active || !game.activeRound || game.pollPending || game.cashoutPending) return;
-    game.pollPending = true;
-    const roundId = game.activeRound.id;
-    const pollController = new AbortController();
-    game.pollAbortController = pollController;
-    try {
-      const result = await api(`/api/round/status?id=${encodeURIComponent(roundId)}`, { signal: pollController.signal });
-      game.statusFailureCount = 0;
-      if (result.status === "running") {
-        // Estimate server clock offset for a smoother display; only server responses settle a round.
-        syncServerClock(result.serverTime);
-        if (!game.cashoutPending) scheduleAnimation();
-        return;
-      }
-      await finishFromServerResult(result, roundId);
-    } catch (error) {
-      // Cash-out deliberately aborts a redundant status request. Don't surface that as a network failure.
-      if (game.cashoutPending || pollController.signal.aborted) return;
-      game.statusFailureCount = Math.min(game.statusFailureCount + 1, 5);
-      const retrySeconds = Math.min(30, (STATUS_POLL_MS * (2 ** game.statusFailureCount)) / 1000);
-      setMessage(`Connection interrupted. Your round remains server-controlled. Retrying status in about ${retrySeconds}s. ${error.message}`, "danger");
-    } finally {
-      if (game.pollAbortController === pollController) game.pollAbortController = null;
-      game.pollPending = false;
-    }
-  }
-
-  async function registerClientSeed() {
-    if (game.clientSeed) return;
-    const seed = newClientSeed();
-    // Commitment has already been received from /api/session or /api/state.
-    const result = await api("/api/client-seed", { method: "POST", body: { clientSeed: seed }, idempotencyKey: newIdempotencyKey() });
-    game.clientSeed = result.clientSeed;
-    if (result.commitment) game.commitment = result.commitment;
-    renderFairness();
-  }
-
-  function updateCommitment(snapshot) {
-    if (snapshot?.commitment) game.commitment = snapshot.commitment;
-    renderFairness();
-  }
-
-  function activateExistingRound(activeRound, recovered = false) {
-    if (!activeRound?.id) return;
-    game.activeRound = {
-      id: activeRound.id,
-      stake: Number(activeRound.stake),
-      startedAt: Number(activeRound.startedAt),
-      commitment: activeRound.commitment || game.commitment,
-      cashoutKey: null
-    };
-    game.activeBet = Number(activeRound.stake);
-    game.active = true;
-    game.recoveredRound = Boolean(recovered);
-    game.multiplier = calculateVisibleMultiplier(estimatedServerTime(), game.activeRound.startedAt, GROWTH_PER_SECOND, MAX_MULTIPLIER);
-    elements.multiplier.classList.add("live");
+  game.multiplier = Math.min(MAX_MULTIPLIER, Math.max(1, Number(item.multiplier) || 1));
+  elements.multiplier.classList.remove("live");
+  updateMultiplierDisplay();
+  if (item.result === "BUSTED") {
+    elements.multiplier.classList.add("busted");
+    elements.meterTrack.classList.add("busted");
+    elements.multiplierCaption.textContent = `Last round crashed at x${game.multiplier.toFixed(2)}.`;
+    elements.holdButtonTitle.textContent = "BUST";
+    setRoundStatus("BUST", "busted");
+    setMessage(`Recovered session: round ${item.round} crashed at x${game.multiplier.toFixed(2)}. Lost ${formatGold(item.stake)} gold.`, "danger");
+  } else {
     elements.multiplier.classList.remove("busted");
     elements.meterTrack.classList.remove("busted");
-    elements.holdButtonTitle.textContent = recovered ? "ROUND RECOVERED" : "RELEASE TO CASH OUT";
-    elements.multiplierCaption.textContent = recovered
-      ? "This round was interrupted. Its committed result will settle automatically; cash-out is disabled after recovery."
-      : "Release to cash out at the current multiplier.";
-    setRoundStatus("RUNNING", "live");
-    setMessage(recovered
-      ? "Recovered an interrupted round. To prevent a delayed cash-out advantage, the server will settle it at its committed crash or x10 cap."
-      : `Bet placed: ${formatGold(game.activeBet)} gold.`, recovered ? "danger" : "success");
-    setHoldPressed(!recovered);
-    scheduleAnimation();
-    scheduleStatusPoll();
-    updateUI();
-    // A recovered round had no continuous client-side hold. Do not allow a retrospective cash-out;
-    // the Durable Object alarm settles it at the committed crash or x10 cap. The status poll only
-    // refreshes the displayed result and does not change the outcome.
-  }
-
-  function showRecoveredLastResult(state) {
-    const item = Array.isArray(state?.history) ? state.history.at(-1) : null;
-    if (!item) {
-      setMessage("Connected to the game server. Ready to play.");
-      return;
-    }
-    game.multiplier = Math.min(MAX_MULTIPLIER, Math.max(1, Number(item.multiplier) || 1));
-    elements.multiplier.classList.remove("live");
-    updateMultiplierDisplay();
-    if (item.result === "BUSTED") {
-      elements.multiplier.classList.add("busted");
-      elements.meterTrack.classList.add("busted");
-      elements.multiplierCaption.textContent = `Last round crashed at x${game.multiplier.toFixed(2)}.`;
-      elements.holdButtonTitle.textContent = "BUST";
-      setRoundStatus("BUST", "busted");
-      setMessage(`Recovered session: round ${item.round} crashed at x${game.multiplier.toFixed(2)}. Lost ${formatGold(item.stake)} gold.`, "danger");
-    } else {
-      elements.multiplier.classList.remove("busted");
-      elements.meterTrack.classList.remove("busted");
-      elements.multiplierCaption.textContent = `Last cash-out at x${game.multiplier.toFixed(2)}.`;
-      elements.holdButtonTitle.textContent = "HOLD TO START";
-      setRoundStatus("LAST ROUND SETTLED");
-      setMessage(`Recovered session: last round paid ${formatGold(item.payout)} gold · net ${formatSignedGold(item.net)}.`, "success");
-    }
-  }
-
-  function scheduleEventReconnect() {
-    if (game.eventReconnectTimer !== null || !game.token || document.hidden) return;
-    const delay = Math.min(15_000, 500 * (2 ** Math.min(game.eventReconnectAttempts, 5)));
-    game.eventReconnectAttempts = Math.min(game.eventReconnectAttempts + 1, 5);
-    game.eventReconnectTimer = setTimeout(() => {
-      game.eventReconnectTimer = null;
-      connectRoundEvents();
-    }, delay);
-  }
-
-  function connectRoundEvents() {
-    if (!API_BASE || !game.token || document.hidden) return;
-    if (game.eventSocket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(game.eventSocket.readyState)) return;
-    const wsBase = API_BASE.replace(/^https:/i, "wss:").replace(/^http:/i, "ws:");
-    let socket;
-    try {
-      // WebSocket cannot set Authorization headers; the Worker verifies this signed token
-      // from a subprotocol, never from a query string, then selects only gamba-events-v1.
-      socket = new WebSocket(`${wsBase}/api/round/events`, ["gamba-events-v1", `gamba-auth.${game.token}`]);
-    } catch {
-      scheduleEventReconnect();
-      return;
-    }
-    game.eventSocket = socket;
-    socket.addEventListener("open", () => {
-      if (game.eventSocket !== socket) return;
-      game.eventReconnectAttempts = 0;
-      // Switch back to the low-traffic watchdog as soon as push delivery is healthy.
-      if (game.active) scheduleStatusPoll();
-    });
-    socket.addEventListener("message", (event) => {
-      let payload;
-      try { payload = JSON.parse(event.data); } catch { return; }
-      syncServerClock(payload.serverTime);
-      if (payload.type !== "round-settled" || !payload.roundId) return;
-      if (game.activeRound?.id === payload.roundId) {
-        void finishFromServerResult(payload, payload.roundId);
-      } else if (game.pendingStart && payload.startKey === game.pendingStart.key) {
-        // A very fast crash may settle before the start HTTP response reaches this browser.
-        game.pendingStart.settlementEvent = payload;
-      }
-    });
-    socket.addEventListener("close", () => {
-      if (game.eventSocket !== socket) return;
-      game.eventSocket = null;
-      if (game.active) scheduleStatusPoll();
-      scheduleEventReconnect();
-    });
-    socket.addEventListener("error", () => {
-      try { socket.close(); } catch { /* close event performs reconnect */ }
-    });
-  }
-
-  async function initializeBackend() {
-    if (!API_BASE) throw new Error("Backend URL is not configured. Open backend-config.js and set GAMBA_API_BASE.");
-    const stored = loadStoredSession();
-    if (stored) {
-      game.sessionId = stored.sessionId;
-      game.token = stored.token;
-      try {
-        const snapshot = await api("/api/state");
-        syncServerClock(snapshot.serverTime);
-        updateCommitment(snapshot);
-        applyState(snapshot.state, snapshot.profile);
-        game.ready = true;
-        await registerClientSeed();
-        if (snapshot.state.activeRound) activateExistingRound(snapshot.state.activeRound, true);
-        else showRecoveredLastResult(snapshot.state);
-        updateUI();
-        renderFairness();
-        connectRoundEvents();
-        return;
-      } catch (error) {
-        if (error.status !== 401) throw error;
-        try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch { /* ignore */ }
-        game.sessionId = null;
-        game.token = null;
-      }
-    }
-
-    const created = await api("/api/session", { method: "POST", body: {}, auth: false });
-    if (!created.token || !created.sessionId || !created.state) throw new Error("The backend returned an incomplete session response.");
-    game.sessionId = created.sessionId;
-    game.token = created.token;
-    try {
-      storeJson(localStorage, SESSION_STORAGE_KEY, {
-        sessionId: game.sessionId,
-        token: game.token
-      });
-    } catch {
-      setMessage("Persistent storage is unavailable. This game can still run, but reopening the browser may create a new session.", "danger");
-    }
-    syncServerClock(created.serverTime);
-    updateCommitment(created);
-    applyState(created.state, created.profile);
-    await registerClientSeed();
-    game.ready = true;
-    setMessage("Connected securely. Ready to play.", "success");
-    updateUI();
-    renderFairness();
-    connectRoundEvents();
-  }
-
-  async function refreshState() {
-    const snapshot = await api("/api/state");
-    syncServerClock(snapshot.serverTime);
-    updateCommitment(snapshot);
-    applyState(snapshot.state, snapshot.profile);
-    if (snapshot.state.activeRound && (!game.activeRound || game.activeRound.id !== snapshot.state.activeRound.id)) {
-      activateExistingRound(snapshot.state.activeRound, true);
-    }
-    return snapshot.state;
-  }
-
-  function sendEarlyReleaseIntent() {
-    const pending = game.pendingStart;
-    if (!pending?.releaseRequested || !game.clientSeed || pending.releasePromise) return;
-    const releaseKey = newIdempotencyKey();
-    // Reuse the server's cash-out key if a fallback request needs to confirm the result.
-    pending.cashoutKey = `early_${releaseKey}`;
-    pending.releasePromise = api("/api/round/release-intent", {
-      method: "POST",
-      // The board stays at x1.00 while startup is pending.
-      body: { startKey: pending.key, requestedMultiplierCents: 100 },
-      idempotencyKey: releaseKey,
-      keepalive: true
-    }).then((result) => {
-      pending.releaseResult = result;
-      return result;
-    }).catch((error) => {
-      pending.releaseResult = { releaseMode: "failed", error };
-      return pending.releaseResult;
-    });
-  }
-
-  async function startRound(source, identifier = null) {
-    if (!game.ready || game.active || game.pendingStart || game.resetPending || game.gameOver || game.waitingForLoan || game.balance <= 0) return;
-    const stake = getBet();
-    if (stake === null) {
-      elements.betNote.textContent = `Enter a whole number between 1 and ${formatGold(game.balance)}.`;
-      elements.betNote.classList.add("error");
-      return;
-    }
-
-    const pending = {
-      key: newIdempotencyKey(), stake,
-      roundNumberBeforeStart: game.roundNumber,
-      requestSent: false, releaseRequested: false, releasePromise: null,
-      releaseResult: null, cashoutKey: null, settlementEvent: null
-    };
-    game.pendingStart = pending;
-    elements.betNote.textContent = "The server validates and deducts your stake.";
-    elements.betNote.classList.remove("error");
-    resetMultiplierBoard();
-    takeHold(source, identifier);
-    elements.holdButtonTitle.textContent = "STARTING ROUND…";
-    setHoldPressed(true);
-    setMessage("Starting your round…");
-    updateUI();
-
-    try {
-      // Repair seed registration if a previous reset succeeded but its follow-up failed.
-      await registerClientSeed();
-      sendEarlyReleaseIntent();
-      pending.requestSent = true;
-      const response = await api("/api/round/start", {
-        method: "POST", body: { stake }, idempotencyKey: pending.key
-      });
-      await handleStartResponse(response, pending);
-    } catch (error) {
-      await recoverFailedStart(error, pending);
-    } finally {
-      if (game.pendingStart === pending) game.pendingStart = null;
-      updateUI();
-    }
-  }
-
-  async function handleStartResponse(response, pending) {
-    syncServerClock(response.serverTime);
-    const event = pending.settlementEvent;
-    const release = pending.releaseResult;
-    // Waiting for the parallel release would delay handling the start response.
-    // Use an arrived result; otherwise the cash-out below confirms it.
-    let settlement = null;
-    if (response.result && response.roundId && response.state) settlement = response;
-    else if (event?.roundId === response.round?.id) settlement = event;
-    else if (pending.releaseRequested && release?.releaseMode === "settled" && release.roundId && release.state) settlement = release;
-
-    game.pendingStart = null;
-    if (settlement) {
-      await finishFromServerResult(settlement, settlement.roundId);
-      return;
-    }
-    activateStartedRound(response, pending);
-    if (pending.releaseRequested) await cashOut();
-  }
-
-  function activateStartedRound(response, pending) {
-    game.activeBet = response.round.stake;
-    game.balance = response.state.balance;
-    game.activeRound = { ...response.round, cashoutKey: pending.releaseRequested ? pending.cashoutKey : null };
-    game.active = true;
-    game.recoveredRound = false;
-    game.lastSettledRoundId = null;
-    elements.multiplier.classList.add("live");
-    setHoldPressed(true);
-    elements.holdButtonTitle.textContent = "RELEASE TO CASH OUT";
-    elements.multiplierCaption.textContent = "Release to cash out at the current multiplier.";
-    setRoundStatus("RUNNING", "live");
-    setMessage(`Bet placed: ${formatGold(pending.stake)} gold.`, "success");
-    updateUI();
-    scheduleAnimation();
-    scheduleStatusPoll();
-  }
-
-  async function recoverFailedStart(error, pending) {
-    const release = pending.releaseResult;
-    if (pending.releaseRequested && release?.releaseMode === "settled" && release.roundId && release.state) {
-      game.pendingStart = null;
-      await finishFromServerResult(release, release.roundId);
-      return;
-    }
-
-    // A lost response does not mean the start failed. Replay the same key, not a new bet.
-    if (pending.requestSent && (!(error instanceof ApiError) || error.status >= 500)) {
-      let replay = null;
-      try {
-        replay = await api("/api/round/start", {
-          method: "POST", body: { stake: pending.stake }, idempotencyKey: pending.key
-        });
-      } catch { /* Reconcile against current state below. */ }
-      if (replay?.round?.id || (replay?.result && replay.roundId && replay.state)) {
-        await handleStartResponse(replay, pending);
-        return;
-      }
-    }
-
-    try {
-      const restored = await refreshState();
-      game.pendingStart = null;
-      clearHoldState();
-      if (restored.activeRound) {
-        // Without a matching start-key replay, this could be another tab's round.
-        // refreshState marks it recovered so this tab cannot cash it out.
-        setMessage("An active round exists for this session, but this tab could not verify that it started the round. The server will settle it automatically.", "danger");
-        return;
-      }
-      if (pending.releaseRequested && Number(restored.roundNumber) > Number(pending.roundNumberBeforeStart)) {
-        showRecoveredLastResult(restored);
-        return;
-      }
-    } catch { /* Preserve the original request error. */ }
-    game.pendingStart = null;
-    clearHoldState();
+    elements.multiplierCaption.textContent = `Last cash-out at x${game.multiplier.toFixed(2)}.`;
     elements.holdButtonTitle.textContent = "HOLD TO START";
-    setRoundStatus("READY");
-    setMessage(error.message || "The server could not start the round.", "danger");
+    setRoundStatus("LAST ROUND SETTLED");
+    setMessage(`Recovered session: last round paid ${formatGold(item.payout)} gold · net ${formatSignedGold(item.net)}.`, "success");
+  }
+}
+
+function scheduleEventReconnect() {
+  if (game.eventReconnectTimer !== null || !game.token || document.hidden) return;
+  const delay = Math.min(15_000, 500 * (2 ** Math.min(game.eventReconnectAttempts, 5)));
+  game.eventReconnectAttempts = Math.min(game.eventReconnectAttempts + 1, 5);
+  game.eventReconnectTimer = setTimeout(() => {
+    game.eventReconnectTimer = null;
+    connectRoundEvents();
+  }, delay);
+}
+
+function connectRoundEvents() {
+  if (!API_BASE || !game.token || document.hidden) return;
+  if (game.eventSocket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(game.eventSocket.readyState)) return;
+  const wsBase = API_BASE.replace(/^https:/i, "wss:").replace(/^http:/i, "ws:");
+  let socket;
+  try {
+    // WebSocket cannot set Authorization headers; the Worker verifies this signed token
+    // from a subprotocol, never from a query string, then selects only gamba-events-v1.
+    socket = new WebSocket(`${wsBase}/api/round/events`, ["gamba-events-v1", `gamba-auth.${game.token}`]);
+  } catch {
+    scheduleEventReconnect();
+    return;
+  }
+  game.eventSocket = socket;
+  socket.addEventListener("open", () => {
+    if (game.eventSocket !== socket) return;
+    game.eventReconnectAttempts = 0;
+    // Switch back to the low-traffic watchdog as soon as push delivery is healthy.
+    if (game.active) scheduleStatusPoll();
+  });
+  socket.addEventListener("message", (event) => {
+    let payload;
+    try { payload = JSON.parse(event.data); } catch { return; }
+    syncServerClock(payload.serverTime);
+    if (payload.type !== "round-settled" || !payload.roundId) return;
+    if (game.activeRound?.id === payload.roundId) {
+      void finishFromServerResult(payload, payload.roundId);
+    } else if (game.pendingStart && payload.startKey === game.pendingStart.key) {
+      // A very fast crash may settle before the start HTTP response reaches this browser.
+      game.pendingStart.settlementEvent = payload;
+    }
+  });
+  socket.addEventListener("close", () => {
+    if (game.eventSocket !== socket) return;
+    game.eventSocket = null;
+    if (game.active) scheduleStatusPoll();
+    scheduleEventReconnect();
+  });
+  socket.addEventListener("error", () => {
+    try { socket.close(); } catch { /* close event performs reconnect */ }
+  });
+}
+
+async function openSession(snapshot, resumed) {
+  syncServerClock(snapshot.serverTime);
+  updateCommitment(snapshot);
+  applyState(snapshot.state, snapshot.profile);
+  await registerClientSeed();
+  game.ready = true;
+  if (!resumed) setMessage("Connected securely. Ready to play.", "success");
+  else if (snapshot.state.activeRound) activateExistingRound(snapshot.state.activeRound, true);
+  else showRecoveredLastResult(snapshot.state);
+  updateUI();
+  renderFairness();
+  connectRoundEvents();
+}
+
+async function initializeBackend() {
+  if (!API_BASE) throw new Error("Backend URL is not configured. Open backend-config.js and set GAMBA_API_BASE.");
+  const stored = loadStoredSession();
+  if (stored) {
+    game.sessionId = stored.sessionId;
+    game.token = stored.token;
+    try {
+      await openSession(await api("/api/state"), true);
+      return;
+    } catch (error) {
+      if (error.status !== 401) throw error;
+      try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch { /* ignore */ }
+      game.sessionId = null;
+      game.token = null;
+    }
   }
 
-  async function finishFromServerResult(response, roundId) {
-    if (!roundId || game.lastSettledRoundId === roundId || game.settlingRoundId === roundId) return;
-    const result = response.result || response.status;
-    if (result === "running") return;
-    game.settlingRoundId = roundId;
-    try {
-      if (!response.state) {
-        const snapshot = await api("/api/state");
-        response.state = snapshot.state;
-        updateCommitment(snapshot);
-      }
-    } catch (error) {
-      if (game.settlingRoundId === roundId) game.settlingRoundId = null;
-      setMessage(`Round settled, but refreshing the wallet failed. Reconnecting… ${error.message}`, "danger");
-      void refreshState().catch(() => {});
-      return;
-    }
-    const historyItem = response.historyItem || (response.state.history || []).find((item) => item.roundId === roundId) || null;
-    // Settling endpoints include a bust crash point. Avoid a second API request for presentation.
-    const crashPoint = response.crashPoint;
+  const created = await api("/api/session", { method: "POST", body: {}, auth: false });
+  if (!created.token || !created.sessionId || !created.state) throw new Error("The backend returned an incomplete session response.");
+  game.sessionId = created.sessionId;
+  game.token = created.token;
+  try {
+    storeJson(localStorage, SESSION_STORAGE_KEY, {
+      sessionId: game.sessionId,
+      token: game.token
+    });
+  } catch {
+    setMessage("Persistent storage is unavailable. This game can still run, but reopening the browser may create a new session.", "danger");
+  }
+  await openSession(created, false);
+}
 
-    game.lastSettledRoundId = roundId;
-    game.active = false;
-    game.recoveredRound = false;
-    game.cashoutPending = false;
-    game.pendingStart = null;
-    stopAnimation();
-    stopStatusPolling();
-    clearHoldState();
-    game.activeRound = null;
-    game.activeBet = 0;
-    elements.multiplier.classList.remove("live");
+async function refreshState() {
+  const snapshot = await api("/api/state");
+  syncServerClock(snapshot.serverTime);
+  updateCommitment(snapshot);
+  applyState(snapshot.state, snapshot.profile);
+  if (snapshot.state.activeRound && (!game.activeRound || game.activeRound.id !== snapshot.state.activeRound.id)) {
+    activateExistingRound(snapshot.state.activeRound, true);
+  }
+  return snapshot.state;
+}
 
-    applyState(response.state, response.profile, { updateModals: false });
-    const isBust = result === "busted";
-    const multiplier = isBust
-      ? (Number.isFinite(Number(crashPoint)) ? Number(crashPoint) : Math.max(1, Number(historyItem?.multiplier) || 1))
-      : Number(response.multiplier ?? historyItem?.multiplier ?? MAX_MULTIPLIER);
-    game.multiplier = Math.min(MAX_MULTIPLIER, Math.max(1, multiplier));
-    updateMultiplierDisplay();
+function sendEarlyReleaseIntent() {
+  const pending = game.pendingStart;
+  if (!pending?.releaseRequested || !game.clientSeed || pending.releasePromise) return;
+  const releaseKey = newIdempotencyKey();
+  // Reuse the server's cash-out key if a fallback request needs to confirm the result.
+  pending.cashoutKey = `early_${releaseKey}`;
+  pending.releasePromise = api("/api/round/release-intent", {
+    method: "POST",
+    // The board stays at x1.00 while startup is pending.
+    body: { startKey: pending.key, requestedMultiplierCents: 100 },
+    idempotencyKey: releaseKey,
+    keepalive: true
+  }).then((result) => {
+    pending.releaseResult = result;
+    return result;
+  }).catch((error) => {
+    pending.releaseResult = { releaseMode: "failed", error };
+    return pending.releaseResult;
+  });
+}
 
-    if (isBust) {
-      elements.multiplier.classList.add("busted");
-      elements.meterTrack.classList.add("busted");
-      elements.multiplierCaption.textContent = `Crashed at x${game.multiplier.toFixed(2)}.`;
-      elements.holdButtonTitle.textContent = "BUST";
-      setRoundStatus("BUST", "busted");
-      setMessage(`Crashed at x${game.multiplier.toFixed(2)}. You lost ${formatGold(historyItem?.stake ?? response.state?.history?.at(-1)?.stake ?? 0)} gold.`, "danger");
-    } else {
-      elements.multiplier.classList.remove("busted");
-      elements.meterTrack.classList.remove("busted");
-      elements.multiplierCaption.textContent = `Cashed out at x${game.multiplier.toFixed(2)}.`;
-      elements.holdButtonTitle.textContent = "HOLD TO START";
-      setRoundStatus("CASHED OUT");
-      const payout = Number(response.payout ?? historyItem?.payout ?? 0);
-      const net = response.net ?? historyItem?.net ?? 0;
-      setMessage(`Payout ${formatGold(payout)} gold · net ${formatSignedGold(net)}.`, "success");
-    }
+async function startRound(source, identifier = null) {
+  if (!game.ready || game.active || game.pendingStart || game.resetPending || game.gameOver || game.waitingForLoan || game.balance <= 0) return;
+  const stake = getBet();
+  if (stake === null) {
+    elements.betNote.textContent = `Enter a whole number between 1 and ${formatGold(game.balance)}.`;
+    elements.betNote.classList.add("error");
+    return;
+  }
 
-    if (response.state.gameOver) {
-      showGameOver("LOAN DEFAULT", "An overdue loan could not be repaid. This game has ended.", "Loan not repaid");
-    } else if (response.state.waitingForLoan && response.state.balance <= 0) {
-      showBankruptcyPrompt();
-    } else {
-      dialogs.closeAll();
-    }
+  const pending = {
+    key: newIdempotencyKey(), stake,
+    roundNumberBeforeStart: game.roundNumber,
+    requestSent: false, releaseRequested: false, releasePromise: null,
+    releaseResult: null, cashoutKey: null, settlementEvent: null
+  };
+  game.pendingStart = pending;
+  elements.betNote.textContent = "The server validates and deducts your stake.";
+  elements.betNote.classList.remove("error");
+  resetMultiplierBoard();
+  takeHold(source, identifier);
+  elements.holdButtonTitle.textContent = "STARTING ROUND…";
+  setHoldPressed(true);
+  setMessage("Starting your round…");
+  updateUI();
+
+  try {
+    // Repair seed registration if a previous reset succeeded but its follow-up failed.
+    await registerClientSeed();
+    sendEarlyReleaseIntent();
+    pending.requestSent = true;
+    const response = await api("/api/round/start", {
+      method: "POST", body: { stake }, idempotencyKey: pending.key
+    });
+    await handleStartResponse(response, pending);
+  } catch (error) {
+    await recoverFailedStart(error, pending);
+  } finally {
+    if (game.pendingStart === pending) game.pendingStart = null;
     updateUI();
-    if (game.settlingRoundId === roundId) game.settlingRoundId = null;
+  }
+}
+
+async function handleStartResponse(response, pending) {
+  syncServerClock(response.serverTime);
+  const event = pending.settlementEvent;
+  const release = pending.releaseResult;
+  // Waiting for the parallel release would delay handling the start response.
+  // Use an arrived result; otherwise the cash-out below confirms it.
+  let settlement = null;
+  if (response.result && response.roundId && response.state) settlement = response;
+  else if (event?.roundId === response.round?.id) settlement = event;
+  else if (pending.releaseRequested && release?.releaseMode === "settled" && release.roundId && release.state) settlement = release;
+
+  game.pendingStart = null;
+  if (settlement) {
+    await finishFromServerResult(settlement, settlement.roundId);
+    return;
+  }
+  activateStartedRound(response, pending);
+  if (pending.releaseRequested) await cashOut();
+}
+
+function activateStartedRound(response, pending) {
+  game.activeBet = response.round.stake;
+  game.balance = response.state.balance;
+  game.activeRound = { ...response.round, cashoutKey: pending.releaseRequested ? pending.cashoutKey : null };
+  game.active = true;
+  game.recoveredRound = false;
+  game.lastSettledRoundId = null;
+  elements.multiplier.classList.add("live");
+  setHoldPressed(true);
+  elements.holdButtonTitle.textContent = "RELEASE TO CASH OUT";
+  elements.multiplierCaption.textContent = "Release to cash out at the current multiplier.";
+  setRoundStatus("RUNNING", "live");
+  setMessage(`Bet placed: ${formatGold(pending.stake)} gold.`, "success");
+  updateUI();
+  scheduleAnimation();
+  scheduleStatusPoll();
+}
+
+async function recoverFailedStart(error, pending) {
+  const release = pending.releaseResult;
+  if (pending.releaseRequested && release?.releaseMode === "settled" && release.roundId && release.state) {
+    game.pendingStart = null;
+    await finishFromServerResult(release, release.roundId);
+    return;
   }
 
-  function showCashoutPending() {
-    // Give immediate feedback on release, while keeping the payout itself server-confirmed.
-    stopAnimation();
-    cancelStatusPollingForCashout();
-    elements.holdButtonTitle.textContent = "CASHING OUT…";
-    setHoldPressed(false);
-    setRoundStatus("CASHING OUT");
-    setMessage("Release received. Confirming your payout…");
-  }
-
-  async function cashOut() {
-    if (game.pendingStart) {
-      game.pendingStart.releaseRequested = true;
-      showCashoutPending();
-      sendEarlyReleaseIntent();
-      return;
-    }
-    if (!game.active || !game.activeRound || game.cashoutPending || game.recoveredRound) return;
-    const requestedMultiplierCents = getVisibleMultiplierCents();
-    game.cashoutPending = true;
-    showCashoutPending();
-    if (!game.activeRound.cashoutKey) game.activeRound.cashoutKey = newIdempotencyKey();
-    const roundId = game.activeRound.id;
+  // A lost response does not mean the start failed. Replay the same key, not a new bet.
+  if (pending.requestSent && (!(error instanceof ApiError) || error.status >= 500)) {
+    let replay = null;
     try {
-      const response = await api("/api/round/cashout", {
-        method: "POST",
-        body: { roundId, requestedMultiplierCents },
-        idempotencyKey: game.activeRound.cashoutKey,
-        // The release may come from pagehide, so let the request outlive the page.
-        keepalive: true
+      replay = await api("/api/round/start", {
+        method: "POST", body: { stake: pending.stake }, idempotencyKey: pending.key
       });
-      await finishFromServerResult(response, roundId);
-    } catch (error) {
-      // The WebSocket can confirm settlement before a slower HTTP cash-out times out.
-      // Do not overwrite that result or reopen recovery UI after the round is already done.
-      if (game.lastSettledRoundId === roundId || !game.active || game.activeRound?.id !== roundId) return;
-      game.cashoutPending = false;
-      if (error.status === 409) {
-        try {
-          const status = await api(`/api/round/status?id=${encodeURIComponent(roundId)}`);
-          if (status.status !== "running") {
-            await finishFromServerResult(status, roundId);
-            return;
-          }
-        } catch { /* show the original message below */ }
-      }
-      elements.holdButtonTitle.textContent = "CHECKING RESULT";
-      setRoundStatus("CHECKING");
-      setMessage(`Cash-out wasn't confirmed yet. Checking the round state. ${error.message}`, "danger");
-      await pollRoundStatus();
-      if (game.active && !game.cashoutPending) scheduleStatusPoll();
-    }
-  }
-
-  // A failed cash-out leaves the round running with the hold released. A new press takes
-  // the hold over so its release can retry. Touch gives every press a new pointerId.
-  function retakeReleasedHold(source, identifier) {
-    if (elements.holdButton.classList.contains("is-holding")) return;
-    takeHold(source, identifier);
-  }
-
-  function releaseHold(source, identifier = null) {
-    if (game.pendingStart && game.holdSource === source) {
-      if (source === "pointer" && game.activePointerId !== identifier) return;
-      if (source === "keyboard" && game.keyboardCode !== identifier) return;
-      game.pendingStart.releaseRequested = true;
-      showCashoutPending();
-      sendEarlyReleaseIntent();
+    } catch { /* Reconcile against current state below. */ }
+    if (replay?.round?.id || (replay?.result && replay.roundId && replay.state)) {
+      await handleStartResponse(replay, pending);
       return;
     }
-    if (!game.active || game.holdSource !== source) return;
+  }
+
+  try {
+    const restored = await refreshState();
+    game.pendingStart = null;
+    clearHoldState();
+    if (restored.activeRound) {
+      // Without a matching start-key replay, this could be another tab's round.
+      // refreshState marks it recovered so this tab cannot cash it out.
+      setMessage("An active round exists for this session, but this tab could not verify that it started the round. The server will settle it automatically.", "danger");
+      return;
+    }
+    if (pending.releaseRequested && Number(restored.roundNumber) > Number(pending.roundNumberBeforeStart)) {
+      showRecoveredLastResult(restored);
+      return;
+    }
+  } catch { /* Preserve the original request error. */ }
+  game.pendingStart = null;
+  clearHoldState();
+  elements.holdButtonTitle.textContent = "HOLD TO START";
+  setRoundStatus("READY");
+  setMessage(error.message || "The server could not start the round.", "danger");
+}
+
+async function finishFromServerResult(response, roundId) {
+  if (!roundId || game.lastSettledRoundId === roundId || game.settlingRoundId === roundId) return;
+  const result = response.result || response.status;
+  if (result === "running") return;
+  game.settlingRoundId = roundId;
+  try {
+    if (!response.state) {
+      const snapshot = await api("/api/state");
+      response.state = snapshot.state;
+      updateCommitment(snapshot);
+    }
+  } catch (error) {
+    if (game.settlingRoundId === roundId) game.settlingRoundId = null;
+    setMessage(`Round settled, but refreshing the wallet failed. Reconnecting… ${error.message}`, "danger");
+    void refreshState().catch(() => {});
+    return;
+  }
+  const historyItem = response.historyItem || (response.state.history || []).find((item) => item.roundId === roundId) || null;
+  // Settling endpoints include a bust crash point. Avoid a second API request for presentation.
+  const crashPoint = response.crashPoint;
+
+  game.lastSettledRoundId = roundId;
+  game.active = false;
+  game.recoveredRound = false;
+  game.cashoutPending = false;
+  game.pendingStart = null;
+  stopAnimation();
+  stopStatusPolling();
+  clearHoldState();
+  game.activeRound = null;
+  game.activeBet = 0;
+  elements.multiplier.classList.remove("live");
+
+  applyState(response.state, response.profile, { updateModals: false });
+  const isBust = result === "busted";
+  const multiplier = isBust
+    ? (Number.isFinite(Number(crashPoint)) ? Number(crashPoint) : Math.max(1, Number(historyItem?.multiplier) || 1))
+    : Number(response.multiplier ?? historyItem?.multiplier ?? MAX_MULTIPLIER);
+  game.multiplier = Math.min(MAX_MULTIPLIER, Math.max(1, multiplier));
+  updateMultiplierDisplay();
+
+  if (isBust) {
+    elements.multiplier.classList.add("busted");
+    elements.meterTrack.classList.add("busted");
+    elements.multiplierCaption.textContent = `Crashed at x${game.multiplier.toFixed(2)}.`;
+    elements.holdButtonTitle.textContent = "BUST";
+    setRoundStatus("BUST", "busted");
+    setMessage(`Crashed at x${game.multiplier.toFixed(2)}. You lost ${formatGold(historyItem?.stake ?? response.state?.history?.at(-1)?.stake ?? 0)} gold.`, "danger");
+  } else {
+    elements.multiplier.classList.remove("busted");
+    elements.meterTrack.classList.remove("busted");
+    elements.multiplierCaption.textContent = `Cashed out at x${game.multiplier.toFixed(2)}.`;
+    elements.holdButtonTitle.textContent = "HOLD TO START";
+    setRoundStatus("CASHED OUT");
+    const payout = Number(response.payout ?? historyItem?.payout ?? 0);
+    const net = response.net ?? historyItem?.net ?? 0;
+    setMessage(`Payout ${formatGold(payout)} gold · net ${formatSignedGold(net)}.`, "success");
+  }
+
+  if (response.state.gameOver) {
+    showGameOver("LOAN DEFAULT", "An overdue loan could not be repaid. This game has ended.", "Loan not repaid");
+  } else if (response.state.waitingForLoan && response.state.balance <= 0) {
+    showBankruptcyPrompt();
+  } else {
+    dialogs.closeAll();
+  }
+  updateUI();
+  if (game.settlingRoundId === roundId) game.settlingRoundId = null;
+}
+
+function showCashoutPending() {
+  // Give immediate feedback on release, while keeping the payout itself server-confirmed.
+  stopAnimation();
+  cancelStatusPollingForCashout();
+  elements.holdButtonTitle.textContent = "CASHING OUT…";
+  setHoldPressed(false);
+  setRoundStatus("CASHING OUT");
+  setMessage("Release received. Confirming your payout…");
+}
+
+function requestEarlyRelease() {
+  game.pendingStart.releaseRequested = true;
+  showCashoutPending();
+  sendEarlyReleaseIntent();
+}
+
+async function cashOut() {
+  if (game.pendingStart) {
+    requestEarlyRelease();
+    return;
+  }
+  if (!game.active || !game.activeRound || game.cashoutPending || game.recoveredRound) return;
+  const requestedMultiplierCents = getVisibleMultiplierCents();
+  game.cashoutPending = true;
+  showCashoutPending();
+  if (!game.activeRound.cashoutKey) game.activeRound.cashoutKey = newIdempotencyKey();
+  const roundId = game.activeRound.id;
+  try {
+    const response = await api("/api/round/cashout", {
+      method: "POST",
+      body: { roundId, requestedMultiplierCents },
+      idempotencyKey: game.activeRound.cashoutKey,
+      // The release may come from pagehide, so let the request outlive the page.
+      keepalive: true
+    });
+    await finishFromServerResult(response, roundId);
+  } catch (error) {
+    // The WebSocket can confirm settlement before a slower HTTP cash-out times out.
+    // Do not overwrite that result or reopen recovery UI after the round is already done.
+    if (game.lastSettledRoundId === roundId || !game.active || game.activeRound?.id !== roundId) return;
+    game.cashoutPending = false;
+    if (error.status === 409) {
+      try {
+        const status = await api(`/api/round/status?id=${encodeURIComponent(roundId)}`);
+        if (status.status !== "running") {
+          await finishFromServerResult(status, roundId);
+          return;
+        }
+      } catch { /* show the original message below */ }
+    }
+    elements.holdButtonTitle.textContent = "CHECKING RESULT";
+    setRoundStatus("CHECKING");
+    setMessage(`Cash-out wasn't confirmed yet. Checking the round state. ${error.message}`, "danger");
+    await pollRoundStatus();
+    if (game.active && !game.cashoutPending) scheduleStatusPoll();
+  }
+}
+
+// A failed cash-out leaves the round running with the hold released. A new press takes
+// the hold over so its release can retry. Touch gives every press a new pointerId.
+function retakeReleasedHold(source, identifier) {
+  if (elements.holdButton.classList.contains("is-holding")) return;
+  takeHold(source, identifier);
+}
+
+function releaseHold(source, identifier = null) {
+  if (game.pendingStart && game.holdSource === source) {
     if (source === "pointer" && game.activePointerId !== identifier) return;
     if (source === "keyboard" && game.keyboardCode !== identifier) return;
+    requestEarlyRelease();
+    return;
+  }
+  if (!game.active || game.holdSource !== source) return;
+  if (source === "pointer" && game.activePointerId !== identifier) return;
+  if (source === "keyboard" && game.keyboardCode !== identifier) return;
+  void cashOut();
+}
+
+function releaseAnyHold() {
+  if (game.pendingStart && game.holdSource) {
+    requestEarlyRelease();
+    return;
+  }
+  if (game.active && game.holdSource) {
     void cashOut();
   }
+}
 
-  function releaseAnyHold() {
-    if (game.pendingStart && game.holdSource) {
-      game.pendingStart.releaseRequested = true;
-      showCashoutPending();
-      sendEarlyReleaseIntent();
-      return;
-    }
-    if (game.active && game.holdSource) {
-      void cashOut();
-    }
-  }
+// The dialog backdrop covers the page message, so failures from dialog buttons are repeated
+// inside the dialogs. Only the open dialog's line is visible.
+function setDialogError(message) {
+  setMessage(message, "danger");
+  dialogs.showError(message);
+}
 
-  // The dialog backdrop covers the page message, so failures from dialog buttons are repeated
-  // inside the dialogs. Only the open dialog's line is visible.
-  function setDialogError(message) {
-    setMessage(message, "danger");
-    dialogs.showError(message);
-  }
+function showBankruptcyPrompt() {
+  if (game.balance > 0 || !game.waitingForLoan || game.gameOver) return;
+  const overdue = game.activeLoans.filter((loan) => loan.roundsLeft <= 0);
+  const due = overdue.reduce((sum, loan) => sum + loan.repayment, 0);
+  updateUI();
+  dialogs.showBankruptcy({
+    allLoansUsed: hasUsedAllLoans(),
+    overdueText: overdue.length ? formatGold(due) : null,
+    hasActiveLoans: game.activeLoans.length > 0
+  });
+}
 
-  function showBankruptcyPrompt() {
-    if (game.balance > 0 || !game.waitingForLoan || game.gameOver) return;
-    const overdue = game.activeLoans.filter((loan) => loan.roundsLeft <= 0);
-    const due = overdue.reduce((sum, loan) => sum + loan.repayment, 0);
-    updateUI();
-    dialogs.showBankruptcy({
-      allLoansUsed: hasUsedAllLoans(),
-      overdueText: overdue.length ? formatGold(due) : null,
-      hasActiveLoans: game.activeLoans.length > 0
-    });
-  }
+function showExhaustedLoansEndState() {
+  updateUI();
+  dialogs.showExhaustedLoans();
+}
 
-  function showExhaustedLoansEndState() {
-    updateUI();
-    dialogs.showExhaustedLoans();
-  }
+function showGameOver(eyebrow, copy, title = "Game over") {
+  updateUI();
+  dialogs.showGameOver(eyebrow, copy, title, formatGold(game.balance));
+}
 
-  function showGameOver(eyebrow, copy, title = "Game over") {
-    updateUI();
-    dialogs.showGameOver(eyebrow, copy, title, formatGold(game.balance));
-  }
-
-  async function acceptDefeat() {
-    if (!game.ready || game.endPending || game.active) return;
-    game.endPending = true;
-    elements.acceptDefeatButton.disabled = true;
-    try {
-      const response = await api("/api/game/end", { method: "POST", body: {}, idempotencyKey: newIdempotencyKey() });
-      const allLoansUsed = hasUsedAllLoans(response.state.loansTaken);
-      if (allLoansUsed) {
-        applyState(response.state, response.profile, { updateModals: false });
-        dialogs.closeAll();
-        setMessage("All three loans were used. Starting a new game…", "success");
-        await startNewGame();
-        // If the reset request fails, reuse the same dialog as a retry path instead of opening a second one.
-        if (game.gameOver) showExhaustedLoansEndState();
-      } else {
-        dialogs.closeAll();
-        applyState(response.state, response.profile);
-        showGameOver("BALANCE DEPLETED", "Your balance reached 0 gold and you chose not to borrow again.", "No gold left");
-      }
-    } catch (error) {
-      setDialogError(error.message || "Couldn't end this game on the server.");
-    } finally {
-      game.endPending = false;
-      elements.acceptDefeatButton.disabled = false;
-    }
-  }
-
-  function openLoanModal() {
-    if (game.balance > 0 || !game.waitingForLoan || game.gameOver || game.active) return;
-    if (hasUsedAllLoans()) return;
-    updateLoanOptions();
-    dialogs.showLoan();
-  }
-
-  function closeLoanModal() {
-    dialogs.closeLoan(game.waitingForLoan);
-    if (!game.waitingForLoan) elements.holdButton.focus();
-  }
-
-  async function takeLoan(principal) {
-    if (!LOANS[principal] || game.loanPending || game.active) return;
-    game.loanPending = true;
-    updateUI();
-    try {
-      const response = await api("/api/loan", { method: "POST", body: { principal }, idempotencyKey: newIdempotencyKey() });
+async function acceptDefeat() {
+  if (!game.ready || game.endPending || game.active) return;
+  game.endPending = true;
+  elements.acceptDefeatButton.disabled = true;
+  try {
+    const response = await api("/api/game/end", { method: "POST", body: {}, idempotencyKey: newIdempotencyKey() });
+    const allLoansUsed = hasUsedAllLoans(response.state.loansTaken);
+    if (allLoansUsed) {
+      applyState(response.state, response.profile, { updateModals: false });
+      dialogs.closeAll();
+      setMessage("All three loans were used. Starting a new game…", "success");
+      await startNewGame();
+      // If the reset request fails, reuse the same dialog as a retry path instead of opening a second one.
+      if (game.gameOver) showExhaustedLoansEndState();
+    } else {
       dialogs.closeAll();
       applyState(response.state, response.profile);
-      if (response.defaulted || response.state.gameOver) {
-        showGameOver("LOAN DEFAULT", "The overdue repayments could not be settled. This game has ended.", "Loan not repaid");
-        return;
-      }
-      const extension = Number(response.extension) || 0;
-      const extText = extension ? ` Existing deadlines and this loan's deadline were extended by ${extension} ${extension === 1 ? "round" : "rounds"}.` : "";
-      const immediate = (response.immediateRepayments || []).map((item) => `${formatGold(item.repayment)} gold`).join(" and ");
-      const immediateText = immediate ? ` Immediate overdue repayment: ${immediate}.` : "";
-      setMessage(`Borrowed ${formatGold(principal)} gold. Repay ${formatGold(response.loan.repayment)} within ${response.loan.roundsLeft} rounds.${extText}${immediateText}`, "success");
-      resetMultiplierBoard();
-      elements.multiplierCaption.textContent = "Place a bet to start the next round.";
-      elements.holdButtonTitle.textContent = "HOLD TO START";
-      setRoundStatus("LOAN TAKEN");
-      elements.holdButton.focus();
-    } catch (error) {
-      try { await refreshState(); } catch { /* Keep last known state visible. */ }
-      // Set after the refresh: it can reopen the "No gold left" dialog, which clears the error line.
-      setDialogError(error.message || "The loan request failed.");
-    } finally {
-      game.loanPending = false;
-      updateUI();
-      closeLoanModal();
+      showGameOver("BALANCE DEPLETED", "Your balance reached 0 gold and you chose not to borrow again.", "No gold left");
     }
+  } catch (error) {
+    setDialogError(error.message || "Couldn't end this game on the server.");
+  } finally {
+    game.endPending = false;
+    elements.acceptDefeatButton.disabled = false;
   }
+}
 
-  async function startNewGame() {
-    if (!game.ready || game.resetPending || game.active || game.pendingStart) return;
-    game.resetPending = true;
-    elements.newGameButton.disabled = true;
-    try {
-      const reset = await api("/api/game/reset", { method: "POST", body: {}, idempotencyKey: newIdempotencyKey() });
-      saveLastReveal(reset.revealed);
-      updateCommitment(reset);
-      applyState(reset.state, reset.profile);
-      dialogs.closeAll();
-      dialogs.resetBankruptcy();
-      elements.betInput.value = "88";
-      elements.multiplier.classList.remove("live");
-      resetMultiplierBoard();
-      elements.multiplierCaption.textContent = "Hold to start. Release to cash out.";
-      elements.holdButtonTitle.textContent = "HOLD TO START";
-      setRoundStatus("READY");
-      await registerClientSeed();
-      setMessage(`New seed batch started. Batch ${reset.revealed.epoch} is now available to verify.`, "success");
-      updateUI();
-      renderFairness();
-      elements.holdButton.focus();
-    } catch (error) {
-      setDialogError(error.message || "Couldn't start a new game on the server.");
-    } finally {
-      game.resetPending = false;
-      elements.newGameButton.disabled = false;
-      updateUI();
-    }
-  }
+function openLoanModal() {
+  if (game.balance > 0 || !game.waitingForLoan || game.gameOver || game.active) return;
+  if (hasUsedAllLoans()) return;
+  updateLoanOptions();
+  dialogs.showLoan();
+}
 
-  async function verifyRevealedFairness() {
-    if (!game.ready) return;
-    elements.verifyFairnessButton.disabled = true;
-    elements.verifyFairnessStatus.className = "fairness-verification";
-    elements.verifyFairnessStatus.textContent = "Checking past rounds…";
-    try {
-      const report = await verifyFairnessHistory(api, (message) => {
-        elements.verifyFairnessStatus.textContent = message;
-      });
-      const { verifiedSeeds, verifiedRounds, pendingRounds, failures } = report;
-      if (failures.length) {
-        elements.verifyFairnessStatus.textContent = `VERIFICATION FAILED (${failures.length} issue(s)): ${failures.slice(0, 5).join("; ")}${failures.length > 5 ? "; more issues omitted" : ""}`;
-        elements.verifyFairnessStatus.classList.add("is-error");
-      } else if (!verifiedSeeds) {
-        elements.verifyFairnessStatus.textContent = `No seed has been revealed yet. ${pendingRounds} round(s) can be checked after you start a new game.`;
-      } else {
-        elements.verifyFairnessStatus.textContent = `PASS · ${verifiedSeeds} seed batch(es), ${verifiedRounds} round(s) checked. ${pendingRounds} current round(s) await seed reveal.`;
-        elements.verifyFairnessStatus.classList.add("is-success");
-      }
-    } catch (error) {
-      elements.verifyFairnessStatus.textContent = `Couldn't verify the complete history: ${error.message}`;
-      elements.verifyFairnessStatus.classList.add("is-error");
-    } finally {
-      elements.verifyFairnessButton.disabled = false;
-    }
-  }
+function closeLoanModal() {
+  dialogs.closeLoan(game.waitingForLoan);
+  if (!game.waitingForLoan) elements.holdButton.focus();
+}
 
-  // Input controls are only for selecting a stake; the server validates it again.
-  elements.betInput.addEventListener("input", () => {
-    const bet = getBet();
-    if (bet !== null) {
-      elements.betNote.textContent = "The server validates and deducts your stake.";
-      elements.betNote.classList.remove("error");
-    } else if (elements.betInput.value !== "") {
-      elements.betNote.textContent = `Enter a whole number between 1 and ${formatGold(game.balance)}.`;
-      elements.betNote.classList.add("error");
-    }
-  });
-
-  elements.maxButton.addEventListener("click", () => {
-    elements.betInput.value = String(game.balance);
-    elements.betInput.dispatchEvent(new Event("input"));
-  });
-
-  quickBetButtons.forEach((button) => {
-    button.addEventListener("click", () => {
-      const fraction = Number(button.dataset.fraction);
-      const amount = Math.max(1, Math.floor(game.balance * fraction));
-      elements.betInput.value = String(amount);
-      elements.betInput.dispatchEvent(new Event("input"));
-    });
-  });
-
-  // Suppress mobile text selection/context menus on the hold surface. CSS also disables
-  // selection on descendants for Safari's touch-selection behavior.
-  for (const eventName of ["selectstart", "contextmenu", "dragstart"]) {
-    elements.holdButton.addEventListener(eventName, (event) => event.preventDefault());
-  }
-
-  // Capture starts on pointerdown; network settlement is asynchronous and server-authoritative.
-  elements.holdButton.addEventListener("pointerdown", (event) => {
-    if (event.pointerType === "mouse" && event.button !== 0) return;
-    event.preventDefault();
-    if (game.active) {
-      retakeReleasedHold("pointer", event.pointerId);
+async function takeLoan(principal) {
+  if (!LOANS[principal] || game.loanPending || game.active) return;
+  game.loanPending = true;
+  updateUI();
+  try {
+    const response = await api("/api/loan", { method: "POST", body: { principal }, idempotencyKey: newIdempotencyKey() });
+    dialogs.closeAll();
+    applyState(response.state, response.profile);
+    if (response.defaulted || response.state.gameOver) {
+      showGameOver("LOAN DEFAULT", "The overdue repayments could not be settled. This game has ended.", "Loan not repaid");
       return;
     }
-    void startRound("pointer", event.pointerId);
-    if (game.pendingStart && game.holdSource === "pointer" && elements.holdButton.setPointerCapture) {
-      try { elements.holdButton.setPointerCapture(event.pointerId); } catch { /* window release handlers are the fallback */ }
-    }
-  });
-
-  window.addEventListener("pointerup", (event) => releaseHold("pointer", event.pointerId));
-  window.addEventListener("pointercancel", (event) => releaseHold("pointer", event.pointerId));
-  elements.holdButton.addEventListener("lostpointercapture", (event) => releaseHold("pointer", event.pointerId));
-  elements.holdButton.addEventListener("keydown", (event) => {
-    if (event.code !== "Space" && event.code !== "Enter") return;
-    event.preventDefault();
-    if (!event.repeat && game.active) retakeReleasedHold("keyboard", event.code);
-    if (!event.repeat && !game.active && !game.pendingStart) void startRound("keyboard", event.code);
-  });
-  window.addEventListener("keyup", (event) => {
-    if (event.code === "Space" || event.code === "Enter") releaseHold("keyboard", event.code);
-  });
-  window.addEventListener("blur", releaseAnyHold);
-  window.addEventListener("pagehide", releaseAnyHold);
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) {
-      releaseAnyHold();
-      stopStatusPolling();
-    } else {
-      connectRoundEvents();
-      if (game.active && game.activeRound) {
-        // Reconcile immediately after backgrounding; WebSocket terminal events provide the
-        // low-latency path, while status polling remains the resilience fallback.
-        void pollRoundStatus().finally(() => { if (game.active) scheduleStatusPoll(); });
-      }
-    }
-  });
-
-  elements.acceptDefeatButton.addEventListener("click", () => {
-    if (game.gameOver) void startNewGame();
-    else void acceptDefeat();
-  });
-  elements.bankLoanButton.addEventListener("click", openLoanModal);
-  elements.loanCloseButton.addEventListener("click", closeLoanModal);
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && dialogs.elements.loanModal.matches(":modal")) closeLoanModal();
-  });
-  loanOptionButtons.forEach((button) => {
-    button.addEventListener("click", () => void takeLoan(Number(button.dataset.loan)));
-  });
-  elements.newGameButton.addEventListener("click", () => void startNewGame());
-  elements.copyCommitmentButton.addEventListener("click", async () => {
-    if (!game.commitment) return;
-    try {
-      await navigator.clipboard.writeText(game.commitment);
-      elements.fairnessMessage.textContent = "Commitment copied.";
-    } catch {
-      elements.fairnessMessage.textContent = "Clipboard access was blocked. Select and copy the commitment text manually.";
-    }
-  });
-  elements.verifyFairnessButton.addEventListener("click", () => void verifyRevealedFairness());
-
-  async function boot() {
-    game.lastReveal = loadSavedLastReveal();
-    renderFairness();
+    const extension = Number(response.extension) || 0;
+    const extText = extension ? ` Existing deadlines and this loan's deadline were extended by ${extension} ${extension === 1 ? "round" : "rounds"}.` : "";
+    const immediate = (response.immediateRepayments || []).map((item) => `${formatGold(item.repayment)} gold`).join(" and ");
+    const immediateText = immediate ? ` Immediate overdue repayment: ${immediate}.` : "";
+    setMessage(`Borrowed ${formatGold(principal)} gold. Repay ${formatGold(response.loan.repayment)} within ${response.loan.roundsLeft} rounds.${extText}${immediateText}`, "success");
+    resetMultiplierBoard();
+    elements.multiplierCaption.textContent = "Place a bet to start the next round.";
+    elements.holdButtonTitle.textContent = "HOLD TO START";
+    setRoundStatus("LOAN TAKEN");
+    elements.holdButton.focus();
+  } catch (error) {
+    try { await refreshState(); } catch { /* Keep last known state visible. */ }
+    // Set after the refresh: it can reopen the "No gold left" dialog, which clears the error line.
+    setDialogError(error.message || "The loan request failed.");
+  } finally {
+    game.loanPending = false;
     updateUI();
-    try {
-      await initializeBackend();
-      game.initializing = false;
-      updateUI();
-    } catch (error) {
-      game.initializing = false;
-      game.ready = false;
-      elements.holdButton.disabled = true;
-      elements.betInput.disabled = true;
-      setRoundStatus("OFFLINE");
-      setMessage(`Couldn't connect to the game server: ${error.message}`, "danger");
-      elements.fairnessMessage.textContent = "Backend connection failed. The game is paused rather than falling back to local randomness.";
-      updateUI();
+    closeLoanModal();
+  }
+}
+
+async function startNewGame() {
+  if (!game.ready || game.resetPending || game.active || game.pendingStart) return;
+  game.resetPending = true;
+  elements.newGameButton.disabled = true;
+  try {
+    const reset = await api("/api/game/reset", { method: "POST", body: {}, idempotencyKey: newIdempotencyKey() });
+    saveLastReveal(reset.revealed);
+    updateCommitment(reset);
+    applyState(reset.state, reset.profile);
+    dialogs.closeAll();
+    dialogs.resetBankruptcy();
+    elements.betInput.value = "88";
+    elements.multiplier.classList.remove("live");
+    resetMultiplierBoard();
+    elements.multiplierCaption.textContent = "Hold to start. Release to cash out.";
+    elements.holdButtonTitle.textContent = "HOLD TO START";
+    setRoundStatus("READY");
+    await registerClientSeed();
+    setMessage(`New seed batch started. Batch ${reset.revealed.epoch} is now available to verify.`, "success");
+    updateUI();
+    renderFairness();
+    elements.holdButton.focus();
+  } catch (error) {
+    setDialogError(error.message || "Couldn't start a new game on the server.");
+  } finally {
+    game.resetPending = false;
+    elements.newGameButton.disabled = false;
+    updateUI();
+  }
+}
+
+async function verifyRevealedFairness() {
+  if (!game.ready) return;
+  elements.verifyFairnessButton.disabled = true;
+  elements.verifyFairnessStatus.className = "fairness-verification";
+  elements.verifyFairnessStatus.textContent = "Checking past rounds…";
+  try {
+    const report = await verifyFairnessHistory(api, (message) => {
+      elements.verifyFairnessStatus.textContent = message;
+    });
+    const { verifiedSeeds, verifiedRounds, pendingRounds, failures } = report;
+    if (failures.length) {
+      elements.verifyFairnessStatus.textContent = `VERIFICATION FAILED (${failures.length} issue(s)): ${failures.slice(0, 5).join("; ")}${failures.length > 5 ? "; more issues omitted" : ""}`;
+      elements.verifyFairnessStatus.classList.add("is-error");
+    } else if (!verifiedSeeds) {
+      elements.verifyFairnessStatus.textContent = `No seed has been revealed yet. ${pendingRounds} round(s) can be checked after you start a new game.`;
+    } else {
+      elements.verifyFairnessStatus.textContent = `PASS · ${verifiedSeeds} seed batch(es), ${verifiedRounds} round(s) checked. ${pendingRounds} current round(s) await seed reveal.`;
+      elements.verifyFairnessStatus.classList.add("is-success");
+    }
+  } catch (error) {
+    elements.verifyFairnessStatus.textContent = `Couldn't verify the complete history: ${error.message}`;
+    elements.verifyFairnessStatus.classList.add("is-error");
+  } finally {
+    elements.verifyFairnessButton.disabled = false;
+  }
+}
+
+// Input controls are only for selecting a stake; the server validates it again.
+elements.betInput.addEventListener("input", () => {
+  const bet = getBet();
+  if (bet !== null) {
+    elements.betNote.textContent = "The server validates and deducts your stake.";
+    elements.betNote.classList.remove("error");
+  } else if (elements.betInput.value !== "") {
+    elements.betNote.textContent = `Enter a whole number between 1 and ${formatGold(game.balance)}.`;
+    elements.betNote.classList.add("error");
+  }
+});
+
+elements.maxButton.addEventListener("click", () => {
+  elements.betInput.value = String(game.balance);
+  elements.betInput.dispatchEvent(new Event("input"));
+});
+
+quickBetButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    const fraction = Number(button.dataset.fraction);
+    const amount = Math.max(1, Math.floor(game.balance * fraction));
+    elements.betInput.value = String(amount);
+    elements.betInput.dispatchEvent(new Event("input"));
+  });
+});
+
+// Suppress mobile text selection/context menus on the hold surface. CSS also disables
+// selection on descendants for Safari's touch-selection behavior.
+for (const eventName of ["selectstart", "contextmenu", "dragstart"]) {
+  elements.holdButton.addEventListener(eventName, (event) => event.preventDefault());
+}
+
+// Capture starts on pointerdown; network settlement is asynchronous and server-authoritative.
+elements.holdButton.addEventListener("pointerdown", (event) => {
+  if (event.pointerType === "mouse" && event.button !== 0) return;
+  event.preventDefault();
+  if (game.active) {
+    retakeReleasedHold("pointer", event.pointerId);
+    return;
+  }
+  void startRound("pointer", event.pointerId);
+  if (game.pendingStart && game.holdSource === "pointer" && elements.holdButton.setPointerCapture) {
+    try { elements.holdButton.setPointerCapture(event.pointerId); } catch { /* window release handlers are the fallback */ }
+  }
+});
+
+window.addEventListener("pointerup", (event) => releaseHold("pointer", event.pointerId));
+window.addEventListener("pointercancel", (event) => releaseHold("pointer", event.pointerId));
+elements.holdButton.addEventListener("lostpointercapture", (event) => releaseHold("pointer", event.pointerId));
+elements.holdButton.addEventListener("keydown", (event) => {
+  if (event.code !== "Space" && event.code !== "Enter") return;
+  event.preventDefault();
+  if (!event.repeat && game.active) retakeReleasedHold("keyboard", event.code);
+  if (!event.repeat && !game.active && !game.pendingStart) void startRound("keyboard", event.code);
+});
+window.addEventListener("keyup", (event) => {
+  if (event.code === "Space" || event.code === "Enter") releaseHold("keyboard", event.code);
+});
+window.addEventListener("blur", releaseAnyHold);
+window.addEventListener("pagehide", releaseAnyHold);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    releaseAnyHold();
+    stopStatusPolling();
+  } else {
+    connectRoundEvents();
+    if (game.active && game.activeRound) {
+      // Reconcile immediately after backgrounding; WebSocket terminal events provide the
+      // low-latency path, while status polling remains the resilience fallback.
+      void pollRoundStatus().finally(() => { if (game.active) scheduleStatusPoll(); });
     }
   }
+});
 
-  initGalaxyCanvas();
-  void boot();
-})();
+elements.acceptDefeatButton.addEventListener("click", () => {
+  if (game.gameOver) void startNewGame();
+  else void acceptDefeat();
+});
+elements.bankLoanButton.addEventListener("click", openLoanModal);
+elements.loanCloseButton.addEventListener("click", closeLoanModal);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && dialogs.elements.loanModal.matches(":modal")) closeLoanModal();
+});
+loanOptionButtons.forEach((button) => {
+  button.addEventListener("click", () => void takeLoan(Number(button.dataset.loan)));
+});
+elements.newGameButton.addEventListener("click", () => void startNewGame());
+elements.copyCommitmentButton.addEventListener("click", async () => {
+  if (!game.commitment) return;
+  try {
+    await navigator.clipboard.writeText(game.commitment);
+    elements.fairnessMessage.textContent = "Commitment copied.";
+  } catch {
+    elements.fairnessMessage.textContent = "Clipboard access was blocked. Select and copy the commitment text manually.";
+  }
+});
+elements.verifyFairnessButton.addEventListener("click", () => void verifyRevealedFairness());
+
+async function boot() {
+  game.lastReveal = loadSavedLastReveal();
+  renderFairness();
+  updateUI();
+  try {
+    await initializeBackend();
+    game.initializing = false;
+    updateUI();
+  } catch (error) {
+    game.initializing = false;
+    game.ready = false;
+    elements.holdButton.disabled = true;
+    elements.betInput.disabled = true;
+    setRoundStatus("OFFLINE");
+    setMessage(`Couldn't connect to the game server: ${error.message}`, "danger");
+    elements.fairnessMessage.textContent = "Backend connection failed. The game is paused rather than falling back to local randomness.";
+    updateUI();
+  }
+}
+
+initGalaxyCanvas();
+void boot();
