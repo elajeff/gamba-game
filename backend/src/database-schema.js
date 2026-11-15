@@ -1,4 +1,4 @@
-// Keep table definitions and schema migrations in one place. Transactions that mutate game
+// Keep table definitions in one place. Transactions that mutate game
 // state remain in GameSession so wallet and round records can still change atomically.
 export function initializeGameSessionSchema(sql) {
   sql.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
@@ -12,11 +12,6 @@ export function initializeGameSessionSchema(sql) {
     status TEXT NOT NULL, payout INTEGER NOT NULL DEFAULT 0, cashed_out_at INTEGER,
     idempotency_key TEXT UNIQUE, response_json TEXT, edge_percent REAL NOT NULL DEFAULT 1
   )`);
-  // Older Durable Objects do not have edge_percent. Ignore only SQLite's duplicate-column case.
-  try { sql.exec("ALTER TABLE rounds ADD COLUMN edge_percent REAL NOT NULL DEFAULT 1"); }
-  catch (error) {
-    if (!String(error?.message || error).toLowerCase().includes("duplicate column")) throw error;
-  }
   sql.exec("CREATE INDEX IF NOT EXISTS rounds_status_idx ON rounds(status)");
   sql.exec("CREATE TABLE IF NOT EXISTS idempotency (key TEXT PRIMARY KEY, action TEXT NOT NULL, response_json TEXT NOT NULL, created_at INTEGER NOT NULL)");
   sql.exec("CREATE INDEX IF NOT EXISTS idempotency_action_created_idx ON idempotency(action, created_at)");

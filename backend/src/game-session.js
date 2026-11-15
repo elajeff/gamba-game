@@ -243,7 +243,7 @@ export class GameSession {
       balance: state.balance, roundNumber: state.roundNumber, gameOver: state.gameOver,
       waitingForLoan: state.waitingForLoan, clientSeed: state.clientSeed,
       activeLoans: state.activeLoans, loansTaken: state.loansTaken,
-      loansRepaid: state.loansRepaid || emptyLoanFlags(),
+      loansRepaid: state.loansRepaid,
       activeRound: active ? { id: active.id, stake: active.stake, startedAt: active.started_at, commitment: this.currentCommitment() } : null,
       history: state.history.slice(-PUBLIC_HISTORY_LIMIT)
     };
@@ -447,7 +447,6 @@ export class GameSession {
     state.balance += payout;
     state.roundNumber += 1;
     const repayments = [];
-    if (!state.loansRepaid) state.loansRepaid = emptyLoanFlags();
     // Collect affordable repayments in nearest-deadline order before advancing deadlines.
     const dueOrder = [...state.activeLoans].sort((a, b) => a.roundsLeft - b.roundsLeft || a.principal - b.principal);
     for (const loan of dueOrder) {
@@ -557,7 +556,6 @@ export class GameSession {
   async takeLoan(body, idempotencyKey) {
     const state = requireState(this.readState());
     requireIdempotencyKey(idempotencyKey);
-    if (!state.loansRepaid) state.loansRepaid = emptyLoanFlags();
     const cached = this.cachedIdempotent(idempotencyKey, "loan");
     if (cached) return json(cached);
     const principal = Number(body?.principal);

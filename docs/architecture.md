@@ -16,7 +16,7 @@
 - `fairness-client.js` retrieves paginated fairness history and verifies revealed commitments and completed rounds. It reports results to `game.js`; it does not access the DOM.
 - `backend/src/index.js` is the HTTP Worker entry point. It validates browser origins, authenticates session requests, forwards requests to the Durable Object and applies the CORS response headers.
 - `backend/src/api-utils.js` owns the common JSON response, bounded JSON parsing and expected API error helpers.
-- `backend/src/database-schema.js` contains table creation, indexes and the migration that adds `edge_percent` to older databases.
+- `backend/src/database-schema.js` contains table creation and indexes.
 - `backend/src/session-stats.js` records settled-round statistics and reads the profile and leaderboard.
 - `backend/src/game-rules.js` holds the named game constants and cash-out multiplier validation/calculation.
 - `backend/src/seed-crypto.js` encrypts server seed records at rest and decrypts them only when required by round processing.
