@@ -148,7 +148,7 @@ export function initGalaxyCanvas() {
 
   function resize() {
     // Read the untransformed parent box: the canvas itself has a subtle CSS drift animation.
-    const rect = (canvas.parentElement || canvas).getBoundingClientRect();
+    const rect = canvas.parentElement.getBoundingClientRect();
     const nextWidth = Math.max(1, rect.width);
     const nextHeight = Math.max(1, rect.height);
     const nextDpr = Math.min(window.devicePixelRatio || 1, 1.5);
@@ -164,8 +164,6 @@ export function initGalaxyCanvas() {
   }
 
   // Particles are placed and painted only at startup and on resize. CSS handles the slight motion.
-  const resizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(resize) : null;
-  if (resizeObserver) resizeObserver.observe(canvas.parentElement);
-  else window.addEventListener("resize", resize, { passive: true });
+  new ResizeObserver(resize).observe(canvas.parentElement);
   resize();
 }
