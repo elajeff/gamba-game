@@ -109,25 +109,28 @@ export class GameSession {
 
   async fetch(request) {
     const url = new URL(request.url);
+    const postRoutes = {
+      "/internal/init": body => this.initialize(body),
+      "/api/client-seed": body => this.setClientSeed(body),
+      "/api/round/start": (body, key) => this.startRound(body, key),
+      "/api/round/release-intent": (body, key) => this.releaseIntent(body, key),
+      "/api/round/cashout": (body, key) => this.cashOut(body, key),
+      "/api/loan": (body, key) => this.takeLoan(body, key),
+      "/api/game/reset": (body, key) => this.resetGame(key),
+      "/api/game/end": (body, key) => this.endGame(key)
+    };
     try {
-      if (url.pathname === "/api/round/events" && request.method === "GET") return this.openRoundEvents(request);
-      if (url.pathname === "/internal/init" && request.method === "POST") return await this.initialize(await readJsonLimited(request));
-      if (url.pathname === "/api/state" && request.method === "GET") return this.stateResponse();
-      if (url.pathname === "/api/client-seed" && request.method === "POST") return await this.setClientSeed(await readJsonLimited(request));
-      if (url.pathname === "/api/round/start" && request.method === "POST") return await this.startRound(await readJsonLimited(request), request.headers.get("idempotency-key"));
-      if (url.pathname === "/api/round/release-intent" && request.method === "POST") return await this.releaseIntent(await readJsonLimited(request), request.headers.get("idempotency-key"));
-      if (url.pathname === "/api/round/cashout" && request.method === "POST") return await this.cashOut(await readJsonLimited(request), request.headers.get("idempotency-key"));
-      if (url.pathname === "/api/round/status" && request.method === "GET") return await this.roundStatus(url.searchParams.get("id"));
-      if (url.pathname === "/api/loan" && request.method === "POST") return await this.takeLoan(await readJsonLimited(request), request.headers.get("idempotency-key"));
-      if (url.pathname === "/api/game/reset" && request.method === "POST") {
-        await readJsonLimited(request);
-        return await this.resetGame(request.headers.get("idempotency-key"));
+      if (request.method === "GET") {
+        if (url.pathname === "/api/round/events") return this.openRoundEvents(request);
+        if (url.pathname === "/api/state") return this.stateResponse();
+        if (url.pathname === "/api/round/status") return await this.roundStatus(url.searchParams.get("id"));
+        if (url.pathname === "/api/fairness") return this.fairness(url.searchParams);
       }
-      if (url.pathname === "/api/game/end" && request.method === "POST") {
-        await readJsonLimited(request);
-        return await this.endGame(request.headers.get("idempotency-key"));
+      const postRoute = request.method === "POST" && postRoutes[url.pathname];
+      if (postRoute) {
+        const body = await readJsonLimited(request);
+        return await postRoute(body, request.headers.get("idempotency-key"));
       }
-      if (url.pathname === "/api/fairness" && request.method === "GET") return this.fairness(url.searchParams);
       return json({ error: "not_found" }, 404);
     } catch (error) {
       if (error instanceof ApiError) {
