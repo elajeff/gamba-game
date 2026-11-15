@@ -72,8 +72,8 @@ Everything except `/health` and `POST /api/session` needs the token `POST /api/s
 | `GET /api/state` | Returns the balance, loans, active round, recent history, commitment and profile. |
 | `POST /api/client-seed` | Sets the client seed (8 to 128 printable ASCII characters, no spaces). Not allowed during a round. |
 | `POST /api/round/start` | Starts a round with a whole-number stake. Key. |
-| `POST /api/round/release-intent` | Sends a release for the round started with the key in `startKey`. Settles the round if it exists, otherwise queues the release. Key. |
-| `POST /api/round/cashout` | Cashes out the round in `roundId`, capped by the server's own multiplier. Key. |
+| `POST /api/round/release-intent` | Sends a release for the round started with the key in `startKey`. Settles the round if it exists, otherwise queues the release. Needs `requestedMultiplierCents`. Key. |
+| `POST /api/round/cashout` | Cashes out the round in `roundId`, capped by the server's own multiplier and by `requestedMultiplierCents` (whole cents, 100 to 1000). Key. |
 | `GET /api/round/status?id=` | Returns a round's status and settles it first if it is due. |
 | `GET /api/round/events` | WebSocket that pushes round settlements. |
 | `POST /api/loan` | Takes a loan of 444, 888 or 1500 gold at a balance of zero. Key. |
