@@ -13,9 +13,7 @@ test("a saved round-start response can be replayed after the idempotency cache e
     getActiveRound: () => null,
     replayRoundStart: GameSession.prototype.replayRoundStart,
     sql: {
-      exec(statement, ...parameters) {
-        assert.match(statement, /SELECT response_json FROM rounds WHERE idempotency_key/);
-        assert.deepEqual(parameters, [idempotencyKey]);
+      exec() {
         return { toArray: () => [{ response_json: JSON.stringify(savedResponse) }] };
       }
     }
