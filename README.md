@@ -12,7 +12,7 @@ The frontend is plain JavaScript on GitHub Pages. The backend is a Cloudflare Wo
 
 - Each session's Durable Object holds the balance, loans and rounds. Wallet changes run in SQLite transactions, and alarms settle a round if the browser disconnects.
 - Start, release, cash-out, loan, reset and end-game requests carry an idempotency key, so a retry can't charge twice.
-- A start reservation stops a second round opening while the first is still starting. A release that arrives during startup is recorded and applied once the round exists.
+- A new start while a round is running is rejected with a 409. A release that arrives during startup is recorded and applied once the round exists.
 - The browser sends the multiplier it showed when you released. The server checks its own clock against the committed crash point first, then pays the lower of the two values. A release that arrives after the crash still loses.
 - Settlement is pushed over a WebSocket. During a round the browser also polls the round status, once a second while the socket is open and every 250 ms while it is down, and stops while the tab is hidden.
 - Each server seed is published as a SHA-256 commitment before use and revealed when it rotates (see below).

@@ -20,10 +20,6 @@ export function initializeGameSessionSchema(sql) {
   sql.exec("CREATE INDEX IF NOT EXISTS rounds_status_idx ON rounds(status)");
   sql.exec("CREATE TABLE IF NOT EXISTS idempotency (key TEXT PRIMARY KEY, action TEXT NOT NULL, response_json TEXT NOT NULL, created_at INTEGER NOT NULL)");
   sql.exec("CREATE INDEX IF NOT EXISTS idempotency_action_created_idx ON idempotency(action, created_at)");
-  sql.exec(`CREATE TABLE IF NOT EXISTS start_reservations (
-    id INTEGER PRIMARY KEY CHECK(id=1), idempotency_key TEXT NOT NULL,
-    received_at INTEGER NOT NULL, created_at INTEGER NOT NULL
-  )`);
   sql.exec(`CREATE TABLE IF NOT EXISTS early_release_intents (
     start_key TEXT PRIMARY KEY, release_key TEXT NOT NULL, released_at INTEGER NOT NULL, created_at INTEGER NOT NULL
   )`);

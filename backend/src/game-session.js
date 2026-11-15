@@ -21,7 +21,6 @@ import {
 
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_-]{16,100}$/;
 const EARLY_RELEASE_WINDOW_MS = 60_000;
-const START_RESERVATION_TIMEOUT_MS = 30_000;
 
 function requireIdempotencyKey(key) {
   if (!key || !IDEMPOTENCY_KEY_PATTERN.test(key)) {
@@ -115,10 +114,7 @@ export class GameSession {
       if (url.pathname === "/internal/init" && request.method === "POST") return await this.initialize(await readJsonLimited(request));
       if (url.pathname === "/api/state" && request.method === "GET") return this.stateResponse();
       if (url.pathname === "/api/client-seed" && request.method === "POST") return await this.setClientSeed(await readJsonLimited(request));
-      if (url.pathname === "/api/round/start" && request.method === "POST") return await this.startRound(
-        await readJsonLimited(request), request.headers.get("idempotency-key"),
-        request.headers.get("x-gamba-internal-received-at")
-      );
+      if (url.pathname === "/api/round/start" && request.method === "POST") return await this.startRound(await readJsonLimited(request), request.headers.get("idempotency-key"));
       if (url.pathname === "/api/round/release-intent" && request.method === "POST") return await this.releaseIntent(await readJsonLimited(request), request.headers.get("idempotency-key"));
       if (url.pathname === "/api/round/cashout" && request.method === "POST") return await this.cashOut(await readJsonLimited(request), request.headers.get("idempotency-key"));
       if (url.pathname === "/api/round/status" && request.method === "GET") return await this.roundStatus(url.searchParams.get("id"));
@@ -329,44 +325,6 @@ export class GameSession {
     return json(queued);
   }
 
-  reserveStartSlot(idempotencyKey, requestReceivedAt) {
-    const now = Date.now();
-    this.ctx.storage.transactionSync(() => {
-      let reservation = this.sql.exec("SELECT idempotency_key,created_at FROM start_reservations WHERE id=1").toArray()[0];
-      // Recover abandoned reservations after an isolate termination or unexpected exception.
-      if (reservation && now - Number(reservation.created_at) > START_RESERVATION_TIMEOUT_MS) {
-        this.sql.exec("DELETE FROM start_reservations WHERE id=1");
-        reservation = null;
-      }
-      if (reservation) {
-        throw new ApiError(409, "round_start_in_progress", "Another start request is already being processed.");
-      }
-      const last = this.sql.exec("SELECT value FROM meta WHERE key='last_start_completed_at'").toArray()[0];
-      if (last && Number.isFinite(Number(last.value)) && requestReceivedAt <= Number(last.value)) {
-        // The request reached the edge before the previous start completed, but was queued
-        // until after that round settled (including an immediate x1.00 bust).
-        throw new ApiError(409, "round_start_in_progress", "This start request overlapped the previous start.");
-      }
-      this.sql.exec("INSERT INTO start_reservations(id,idempotency_key,received_at,created_at) VALUES(1,?,?,?)",
-        idempotencyKey, requestReceivedAt, now);
-    });
-  }
-
-  finishStartSlot(idempotencyKey) {
-    const completedAt = Date.now();
-    this.ctx.storage.transactionSync(() => {
-      this.sql.exec("INSERT INTO meta(key,value) VALUES('last_start_completed_at',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        String(completedAt));
-      this.sql.exec("DELETE FROM start_reservations WHERE id=1 AND idempotency_key=?", idempotencyKey);
-    });
-  }
-
-  releaseStartSlot(idempotencyKey) {
-    this.ctx.storage.transactionSync(() => {
-      this.sql.exec("DELETE FROM start_reservations WHERE id=1 AND idempotency_key=?", idempotencyKey);
-    });
-  }
-
   async replayRoundStart(response) {
     const active = this.getActiveRound();
     if (active && active.id === response.round?.id) {
@@ -375,7 +333,7 @@ export class GameSession {
     return json({ ...response, serverTime: Date.now() });
   }
 
-  async startRound(body, idempotencyKey, receivedAtHeader = null) {
+  async startRound(body, idempotencyKey) {
     requireIdempotencyKey(idempotencyKey);
     const cached = this.cachedIdempotent(idempotencyKey, "round-start");
     if (cached) return this.replayRoundStart(cached);
@@ -389,21 +347,7 @@ export class GameSession {
       return json(result.data, result.status);
     }
 
-    const parsedReceivedAt = Number(receivedAtHeader);
-    const requestReceivedAt = Number.isSafeInteger(parsedReceivedAt) && parsedReceivedAt > 0
-      ? parsedReceivedAt : Date.now();
-    const operation = (async () => {
-      try {
-        this.reserveStartSlot(idempotencyKey, requestReceivedAt);
-        const response = await this.startRoundCore(body, idempotencyKey);
-        const result = { status: response.status, data: await response.json() };
-        this.finishStartSlot(idempotencyKey);
-        return result;
-      } catch (error) {
-        this.releaseStartSlot(idempotencyKey);
-        throw error;
-      }
-    })();
+    const operation = this.startRoundCore(body, idempotencyKey).then(async (response) => ({ status: response.status, data: await response.json() }));
     this.pendingStartPromises.set(idempotencyKey, operation);
     try {
       const result = await operation;
