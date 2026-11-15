@@ -7,7 +7,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile, copyFile, readdir } from "node
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
+import test, { before, after } from "node:test";
 import { calculateRoundOutcome } from "../../tools/verify-fairness.js";
 
 const BACKEND_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -148,13 +148,17 @@ function openEventSocket(baseUrl, token) {
   return { socket, waitFor };
 }
 
+let baseUrl;
+let child;
+let tempRoot;
+
 // This suite launches a fresh, local Wrangler Worker with test-only secrets and
 // temporary SQLite Durable Object storage. It never calls or mutates production.
-test("gamba backend local integration and regression suite", { timeout: 120_000 }, async (t) => {
+before(async () => {
   assert.ok(await readFile(WRANGLER_CLI).then(() => true).catch(() => false),
     `Wrangler CLI not found at ${WRANGLER_CLI}. Run npm install in the backend folder first.`);
 
-  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "gamba-backend-tests-"));
+  tempRoot = await mkdtemp(path.join(os.tmpdir(), "gamba-backend-tests-"));
   const tempSrc = path.join(tempRoot, "src");
   await mkdir(tempSrc, { recursive: true });
   // The Worker is split into small modules; copy the complete source set into the isolated test app.
@@ -174,9 +178,9 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
   );
 
   const port = await getFreePort();
-  const baseUrl = `http://127.0.0.1:${port}`;
+  baseUrl = `http://127.0.0.1:${port}`;
   let logs = "";
-  const child = spawn(process.execPath, [
+  child = spawn(process.execPath, [
     WRANGLER_CLI, "dev", "--config", path.join(tempRoot, "wrangler.toml"),
     "--port", String(port), "--ip", "127.0.0.1", "--log-level", "error"
   ], {
@@ -190,540 +194,547 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
   child.stdout.on("data", (chunk) => { logs = (logs + chunk).slice(-12_000); });
   child.stderr.on("data", (chunk) => { logs = (logs + chunk).slice(-12_000); });
 
-  try {
-    await waitForHealth(baseUrl, child, () => logs);
+  await waitForHealth(baseUrl, child, () => logs);
+}, { timeout: 60_000 });
 
-    await t.test("health, CORS, and token authentication", async () => {
-      const health = await api(baseUrl, "/health", { origin: ALLOWED_ORIGIN });
-      assert.equal(health.status, 200);
-      assert.equal(health.data.ok, true);
-      assert.equal(health.headers.get("access-control-allow-origin"), ALLOWED_ORIGIN);
-      assert.equal(health.headers.get("x-content-type-options"), "nosniff");
-      assert.equal(health.headers.get("x-frame-options"), "DENY");
-      assert.equal(health.headers.get("cache-control"), "no-store");
+after(async () => {
+  await stopProcess(child);
+  await rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+});
 
-      const pagesHealth = await api(baseUrl, "/health", { origin: SECOND_ALLOWED_ORIGIN });
-      assert.equal(pagesHealth.status, 200);
-      assert.equal(pagesHealth.headers.get("access-control-allow-origin"), SECOND_ALLOWED_ORIGIN);
+test("health, CORS, and token authentication", async () => {
+  const health = await api(baseUrl, "/health", { origin: ALLOWED_ORIGIN });
+  assert.equal(health.status, 200);
+  assert.equal(health.data.ok, true);
+  assert.equal(health.headers.get("access-control-allow-origin"), ALLOWED_ORIGIN);
+  assert.equal(health.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(health.headers.get("x-frame-options"), "DENY");
+  assert.equal(health.headers.get("cache-control"), "no-store");
 
-      const rejectedOrigin = await api(baseUrl, "/health", { origin: "https://not-our-site.example" });
-      assert.equal(rejectedOrigin.status, 403);
-      assert.equal(rejectedOrigin.data.error, "origin_not_allowed");
+  const pagesHealth = await api(baseUrl, "/health", { origin: SECOND_ALLOWED_ORIGIN });
+  assert.equal(pagesHealth.status, 200);
+  assert.equal(pagesHealth.headers.get("access-control-allow-origin"), SECOND_ALLOWED_ORIGIN);
 
-      const noAuth = await api(baseUrl, "/api/state");
-      assert.equal(noAuth.status, 401);
-      assert.equal(noAuth.data.error, "unauthorized");
+  const rejectedOrigin = await api(baseUrl, "/health", { origin: "https://not-our-site.example" });
+  assert.equal(rejectedOrigin.status, 403);
+  assert.equal(rejectedOrigin.data.error, "origin_not_allowed");
 
-      const noAuthReleaseIntent = await api(baseUrl, "/api/round/release-intent", {
-        method: "POST", body: { startKey: idempotencyKey() }
-      });
-      assert.equal(noAuthReleaseIntent.status, 401);
-      assert.equal(noAuthReleaseIntent.data.error, "unauthorized");
+  const noAuth = await api(baseUrl, "/api/state");
+  assert.equal(noAuth.status, 401);
+  assert.equal(noAuth.data.error, "unauthorized");
+
+  const noAuthReleaseIntent = await api(baseUrl, "/api/round/release-intent", {
+    method: "POST", body: { startKey: idempotencyKey() }
+  });
+  assert.equal(noAuthReleaseIntent.status, 401);
+  assert.equal(noAuthReleaseIntent.data.error, "unauthorized");
+});
+
+test("session initializes with separate, authenticated state", async () => {
+  const created = await api(baseUrl, "/api/session", { method: "POST", body: {} });
+  assert.equal(created.status, 201, `Session creation failed: ${created.text}`);
+  const session = created.data;
+  assert.equal(session.state.balance, STARTING_GOLD);
+  assert.equal(session.state.roundNumber, 0);
+  assert.equal(session.epoch, 1);
+  assert.match(session.commitment, /^[0-9a-f]{64}$/);
+  assert.equal(session.profile?.stats?.roundsPlayed, 0);
+  assert.deepEqual(session.profile?.leaderboard, []);
+  assert.ok(session.token);
+  const token = session.token;
+
+  const state = await api(baseUrl, "/api/state", { token });
+  assert.equal(state.status, 200);
+  assert.equal(state.data.state.balance, STARTING_GOLD);
+  assert.equal(state.data.state.activeRound, null);
+
+  const tamperedToken = await api(baseUrl, "/api/state", { token: `${token}x` });
+  assert.equal(tamperedToken.status, 401);
+
+  const noSeedStart = await api(baseUrl, "/api/round/start", {
+    method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 1 }
+  });
+  assert.equal(noSeedStart.status, 409);
+  assert.equal(noSeedStart.data.error, "client_seed_required");
+
+  const seedSet = await api(baseUrl, "/api/client-seed", { method: "POST", token, body: { clientSeed: LONG_ROUNDS_SEED } });
+  assert.equal(seedSet.status, 200, seedSet.text);
+  assert.equal(seedSet.data.clientSeed, LONG_ROUNDS_SEED);
+  assert.equal(seedSet.data.commitment, session.commitment);
+});
+
+test("rejects invalid client seeds and malformed/oversized requests", async () => {
+  const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
+  const invalidSeed = await api(baseUrl, "/api/client-seed", { method: "POST", token, body: { clientSeed: "has spaces" } });
+  assert.equal(invalidSeed.status, 400);
+  assert.equal(invalidSeed.data.error, "invalid_client_seed");
+
+  const invalidReleaseKey = await api(baseUrl, "/api/round/release-intent", {
+    method: "POST", token, headers: { "idempotency-key": "bad" }, body: { startKey: idempotencyKey() }
+  });
+  assert.equal(invalidReleaseKey.status, 400);
+  assert.equal(invalidReleaseKey.data.error, "idempotency_key_required");
+
+  const invalidStartKey = await api(baseUrl, "/api/round/release-intent", {
+    method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { startKey: "bad" }
+  });
+  assert.equal(invalidStartKey.status, 400);
+  assert.equal(invalidStartKey.data.error, "start_key_required");
+
+  const malformed = await api(baseUrl, "/api/session", { method: "POST", rawBody: "{not-json" });
+  assert.equal(malformed.status, 400);
+  assert.equal(malformed.data.error, "invalid_json");
+
+  const tooLarge = await api(baseUrl, "/api/session", {
+    method: "POST", rawBody: JSON.stringify({ padding: "x".repeat(9000) })
+  });
+  assert.equal(tooLarge.status, 413);
+  assert.equal(tooLarge.data.error, "request_too_large");
+});
+
+test("rejects invalid stakes and loans without mutating the wallet", async () => {
+  const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
+  for (const stake of [0, -1, 1.5, 888.5, Math.floor(Number.MAX_SAFE_INTEGER / 10) + 1]) {
+    const response = await api(baseUrl, "/api/round/start", {
+      method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { stake }
     });
+    assert.equal(response.status, 400, `Stake ${stake} should be rejected: ${response.text}`);
+    assert.equal(response.data.error, "invalid_stake");
+  }
 
-    const created = await api(baseUrl, "/api/session", { method: "POST", body: {} });
-    assert.equal(created.status, 201, `Session creation failed: ${created.text}`);
-    const session = created.data;
-    assert.equal(session.state.balance, STARTING_GOLD);
-    assert.equal(session.state.roundNumber, 0);
-    assert.equal(session.epoch, 1);
-    assert.match(session.commitment, /^[0-9a-f]{64}$/);
-    assert.equal(session.profile?.stats?.roundsPlayed, 0);
-    assert.deepEqual(session.profile?.leaderboard, []);
-    assert.ok(session.token);
-    const auth = session.token;
-
-    await t.test("session initializes with separate, authenticated state", async () => {
-      const state = await api(baseUrl, "/api/state", { token: auth });
-      assert.equal(state.status, 200);
-      assert.equal(state.data.state.balance, STARTING_GOLD);
-      assert.equal(state.data.state.activeRound, null);
-
-      const tamperedToken = await api(baseUrl, "/api/state", { token: `${auth}x` });
-      assert.equal(tamperedToken.status, 401);
-
-      const noSeedStart = await api(baseUrl, "/api/round/start", {
-        method: "POST", token: auth, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 1 }
-      });
-      assert.equal(noSeedStart.status, 409);
-      assert.equal(noSeedStart.data.error, "client_seed_required");
+  for (const principal of [123, 444.5]) {
+    const response = await api(baseUrl, "/api/loan", {
+      method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { principal }
     });
+    assert.equal(response.status, 400);
+    assert.equal(response.data.error, "invalid_loan");
+  }
+  const loanTooEarly = await api(baseUrl, "/api/loan", {
+    method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { principal: 444 }
+  });
+  assert.equal(loanTooEarly.status, 409);
+  assert.equal(loanTooEarly.data.error, "loan_requires_zero_balance");
 
-    const seedSet = await api(baseUrl, "/api/client-seed", { method: "POST", token: auth, body: { clientSeed: LONG_ROUNDS_SEED } });
-    assert.equal(seedSet.status, 200, seedSet.text);
-    assert.equal(seedSet.data.clientSeed, LONG_ROUNDS_SEED);
-    assert.equal(seedSet.data.commitment, session.commitment);
+  const state = await api(baseUrl, "/api/state", { token });
+  assert.equal(state.data.state.balance, STARTING_GOLD);
+  assert.equal(state.data.state.roundNumber, 0);
+  assert.equal(state.data.state.activeRound, null);
+  assert.equal(state.data.state.activeLoans.length, 0);
+});
 
-    await t.test("rejects invalid client seeds and malformed/oversized requests", async () => {
-      const invalidSeed = await api(baseUrl, "/api/client-seed", { method: "POST", token: auth, body: { clientSeed: "has spaces" } });
-      assert.equal(invalidSeed.status, 400);
-      assert.equal(invalidSeed.data.error, "invalid_client_seed");
+test("duplicate start and cash-out requests replay without creating or settling a round twice", async () => {
+  const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
+  const startKey = idempotencyKey();
+  const firstStart = await api(baseUrl, "/api/round/start", {
+    method: "POST", token, headers: { "idempotency-key": startKey }, body: { stake: 1 }
+  });
+  assert.equal(firstStart.status, 200, firstStart.text);
+  assert.equal(firstStart.data.state.balance, STARTING_GOLD - 1);
+  assert.ok(Number.isFinite(firstStart.data.serverTime), "Start response must include a server-clock sample.");
+  assert.equal(Object.hasOwn(firstStart.data, "crashPoint"), false, "Crash point must not be sent while round is running.");
+  const firstRoundId = firstStart.data.round.id;
 
-      const invalidReleaseKey = await api(baseUrl, "/api/round/release-intent", {
-        method: "POST", token: auth, headers: { "idempotency-key": "bad" }, body: { startKey: idempotencyKey() }
-      });
-      assert.equal(invalidReleaseKey.status, 400);
-      assert.equal(invalidReleaseKey.data.error, "idempotency_key_required");
+  const roundsBeforeReplay = await api(baseUrl, "/api/fairness?limit=10", { token });
+  assert.equal(roundsBeforeReplay.status, 200);
 
-      const invalidStartKey = await api(baseUrl, "/api/round/release-intent", {
-        method: "POST", token: auth, headers: { "idempotency-key": idempotencyKey() }, body: { startKey: "bad" }
-      });
-      assert.equal(invalidStartKey.status, 400);
-      assert.equal(invalidStartKey.data.error, "start_key_required");
+  const replayStart = await api(baseUrl, "/api/round/start", {
+    method: "POST", token, headers: { "idempotency-key": startKey }, body: { stake: 1 }
+  });
+  assert.equal(replayStart.status, 200, replayStart.text);
+  assert.equal(replayStart.data.round.id, firstRoundId);
+  assert.ok(Number.isFinite(replayStart.data.serverTime), "Idempotent replay should get a fresh server-clock sample.");
+  const roundsAfterReplay = await api(baseUrl, "/api/fairness?limit=10", { token });
+  assert.equal(roundsAfterReplay.status, 200);
+  assert.equal(roundsAfterReplay.data.totalRounds, roundsBeforeReplay.data.totalRounds,
+    "Replaying a start request must not create another round.");
 
-      const malformed = await api(baseUrl, "/api/session", { method: "POST", rawBody: "{not-json" });
-      assert.equal(malformed.status, 400);
-      assert.equal(malformed.data.error, "invalid_json");
+  const wrongActionReuse = await api(baseUrl, "/api/round/cashout", {
+    method: "POST", token, headers: { "idempotency-key": startKey }, body: { roundId: firstRoundId }
+  });
+  assert.equal(wrongActionReuse.status, 409);
+  assert.equal(wrongActionReuse.data.error, "idempotency_key_reused");
 
-      const tooLarge = await api(baseUrl, "/api/session", {
-        method: "POST", rawBody: JSON.stringify({ padding: "x".repeat(9000) })
-      });
-      assert.equal(tooLarge.status, 413);
-      assert.equal(tooLarge.data.error, "request_too_large");
+  const cashKey = idempotencyKey();
+  const firstCashout = await api(baseUrl, "/api/round/cashout", {
+    method: "POST", token, headers: { "idempotency-key": cashKey }, body: { roundId: firstRoundId }
+  });
+  assert.equal(firstCashout.status, 200, firstCashout.text);
+  assert.equal(firstCashout.data.result, "cashed_out");
+  assert.equal(firstCashout.data.payout, 1);
+  assert.equal(firstCashout.data.state.balance, STARTING_GOLD);
+
+  const replayCashout = await api(baseUrl, "/api/round/cashout", {
+    method: "POST", token, headers: { "idempotency-key": cashKey }, body: { roundId: firstRoundId }
+  });
+  assert.equal(replayCashout.status, 200, replayCashout.text);
+  assert.equal(replayCashout.data.result, "cashed_out");
+  assert.equal(replayCashout.data.payout, 1);
+
+  const currentState = await api(baseUrl, "/api/state", { token });
+  assert.equal(currentState.data.state.balance, STARTING_GOLD);
+  assert.equal(currentState.data.state.roundNumber, 1);
+  assert.equal(currentState.data.state.activeRound, null);
+  assert.equal(currentState.data.profile.stats.roundsPlayed, 1);
+  assert.equal(currentState.data.profile.stats.totalStaked, 1);
+  assert.equal(currentState.data.profile.stats.totalPayout, 1);
+  assert.ok(Array.isArray(currentState.data.profile.leaderboard));
+  assert.ok(currentState.data.profile.leaderboard.length <= 5);
+});
+
+test("rejects overlapping round starts", async () => {
+  const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
+  const stateBefore = await api(baseUrl, "/api/state", { token });
+  const fairnessBefore = await api(baseUrl, "/api/fairness?limit=100", { token });
+  const [a, b] = await Promise.all([
+    api(baseUrl, "/api/round/start", { method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 2 } }),
+    api(baseUrl, "/api/round/start", { method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 3 } })
+  ]);
+  const accepted = [a, b].filter((result) => result.status === 200);
+  const conflicts = [a, b].filter((result) => result.status === 409);
+  assert.equal(accepted.length, 1, `${a.text}; ${b.text}`);
+  assert.equal(conflicts.length, 1, `${a.text}; ${b.text}`);
+
+  const winner = accepted[0].data;
+  const winnerStake = winner.round.stake;
+  assert.equal(winner.state.balance, stateBefore.data.state.balance - winnerStake,
+    "The start response must reflect exactly the accepted stake.");
+  const fairnessAfter = await api(baseUrl, "/api/fairness?limit=100", { token });
+  assert.equal(fairnessAfter.data.totalRounds, fairnessBefore.data.totalRounds + 1,
+    "Only the accepted start may create a round record.");
+
+  const settle = await cashOut(baseUrl, token, winner.round.id, 100);
+  assert.equal(settle.status, 200, settle.text);
+  assert.equal(settle.data.result, "cashed_out");
+  assert.equal(settle.data.payout, winnerStake);
+  const settledState = await api(baseUrl, "/api/state", { token });
+  assert.equal(settledState.data.state.activeRound, null);
+  assert.equal(settledState.data.profile.stats.roundsPlayed,
+    stateBefore.data.profile.stats.roundsPlayed + 1,
+    "The settled round should update session statistics exactly once.");
+  assert.equal(settledState.data.profile.stats.totalStaked,
+    stateBefore.data.profile.stats.totalStaked + winnerStake,
+    "Session statistics should include every accepted stake exactly once.");
+  assert.ok(settledState.data.profile.leaderboard.length <= 5);
+  for (let i = 1; i < settledState.data.profile.leaderboard.length; i += 1) {
+    const previous = settledState.data.profile.leaderboard[i - 1];
+    const current = settledState.data.profile.leaderboard[i];
+    assert.ok(previous.payout > current.payout ||
+      (previous.payout === current.payout && previous.multiplier >= current.multiplier),
+      "Personal-best payouts must stay ordered by payout then multiplier.");
+  }
+});
+
+test("revealed seed matches its original commitment and recomputes stored crash points", async () => {
+  const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
+  for (let played = 0; played < 2; played += 1) {
+    const started = await api(baseUrl, "/api/round/start", {
+      method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 1 }
     });
+    assert.equal(started.status, 200, started.text);
+    const settled = await cashOut(baseUrl, token, started.data.round.id, 100);
+    assert.equal(settled.status, 200, settled.text);
+  }
 
-    await t.test("rejects invalid stakes and loans without mutating the wallet", async () => {
-      for (const stake of [0, -1, 1.5, 888.5, Math.floor(Number.MAX_SAFE_INTEGER / 10) + 1]) {
-        const response = await api(baseUrl, "/api/round/start", {
-          method: "POST", token: auth, headers: { "idempotency-key": idempotencyKey() }, body: { stake }
-        });
-        assert.equal(response.status, 400, `Stake ${stake} should be rejected: ${response.text}`);
-        assert.equal(response.data.error, "invalid_stake");
-      }
+  const reset = await api(baseUrl, "/api/game/reset", {
+    method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: {}
+  });
+  assert.equal(reset.status, 200, reset.text);
+  assert.equal(reset.data.revealed.epoch, 1);
+  assert.equal(reset.data.epoch, 2);
+  assert.equal(reset.data.state.balance, STARTING_GOLD);
+  assert.equal(reset.data.state.roundNumber, 0);
+  const revealedSeed = reset.data.revealed.serverSeed;
+  assert.equal(revealedSeed, SERVER_SEED);
+  const calculatedCommitment = createHash("sha256").update(revealedSeed, "utf8").digest("hex");
+  assert.equal(calculatedCommitment, reset.data.revealed.commitment);
 
-      for (const principal of [123, 444.5]) {
-        const response = await api(baseUrl, "/api/loan", {
-          method: "POST", token: auth, headers: { "idempotency-key": idempotencyKey() }, body: { principal }
-        });
-        assert.equal(response.status, 400);
-        assert.equal(response.data.error, "invalid_loan");
-      }
-      const loanTooEarly = await api(baseUrl, "/api/loan", {
-        method: "POST", token: auth, headers: { "idempotency-key": idempotencyKey() }, body: { principal: 444 }
-      });
-      assert.equal(loanTooEarly.status, 409);
-      assert.equal(loanTooEarly.data.error, "loan_requires_zero_balance");
+  const fairness = await api(baseUrl, "/api/fairness?limit=100", { token });
+  assert.equal(fairness.status, 200);
+  assert.equal(fairness.data.currentEpoch, 2);
+  const oldSeedRecord = fairness.data.seeds.find((seed) => seed.epoch === 1);
+  assert.ok(oldSeedRecord);
+  assert.equal(oldSeedRecord.revealed_seed, revealedSeed);
+  assert.equal(oldSeedRecord.commitment, calculatedCommitment);
 
-      const state = await api(baseUrl, "/api/state", { token: auth });
-      assert.equal(state.data.state.balance, STARTING_GOLD);
-      assert.equal(state.data.state.roundNumber, 0);
-      assert.equal(state.data.state.activeRound, null);
-      assert.equal(state.data.state.activeLoans.length, 0);
+  const oldRounds = fairness.data.rounds.filter((round) => round.epoch === 1);
+  assert.equal(oldRounds.length, 2, "Expected both test rounds to remain in the round history.");
+
+  const pageOne = await api(baseUrl, "/api/fairness?limit=1&roundOffset=0&seedOffset=0", { token });
+  const pageTwo = await api(baseUrl, "/api/fairness?limit=1&roundOffset=1&seedOffset=1", { token });
+  assert.equal(pageOne.status, 200);
+  assert.equal(pageTwo.status, 200);
+  assert.equal(pageOne.data.totalRounds, fairness.data.totalRounds);
+  assert.equal(pageOne.data.rounds.length, 1);
+  assert.equal(pageTwo.data.rounds.length, 1);
+  assert.notEqual(pageOne.data.rounds[0].id, pageTwo.data.rounds[0].id,
+    "roundOffset must return the next page rather than repeat page one");
+  assert.equal(pageTwo.data.seeds[0].epoch, 2,
+    "seedOffset must return the second seed epoch when requested");
+
+  const refreshedAfterReset = await api(baseUrl, "/api/state", { token });
+  assert.equal(refreshedAfterReset.data.state.balance, STARTING_GOLD);
+  assert.equal(refreshedAfterReset.data.state.roundNumber, 0);
+  assert.equal(refreshedAfterReset.data.state.clientSeed, null);
+  assert.equal(refreshedAfterReset.data.state.activeRound, null);
+  assert.equal(refreshedAfterReset.data.state.activeLoans.length, 0);
+  assert.equal(refreshedAfterReset.data.epoch, 2);
+  assert.equal(refreshedAfterReset.data.profile.stats.roundsPlayed, oldRounds.length,
+    "Session statistics must persist across game resets and include every settled round from the revealed epoch");
+  for (const round of oldRounds) {
+    assert.equal(round.status, "cashed_out", `Round ${round.id} should have cashed out.`);
+    assert.equal(typeof round.crash_point, "number");
+    assert.equal(calculateRoundOutcome(revealedSeed, round, 1).crashPoint, round.crash_point,
+      `Crash point mismatch for round ${round.id}, nonce ${round.nonce}`);
+  }
+});
+
+test("a second session is independent", async () => {
+  const first = await api(baseUrl, "/api/session", { method: "POST", body: {} });
+  assert.equal(first.status, 201, first.text);
+  const second = await api(baseUrl, "/api/session", { method: "POST", body: {} });
+  assert.equal(second.status, 201, second.text);
+  assert.notEqual(second.data.sessionId, first.data.sessionId);
+
+  const reset = await api(baseUrl, "/api/game/reset", {
+    method: "POST", token: first.data.token, headers: { "idempotency-key": idempotencyKey() }, body: {}
+  });
+  assert.equal(reset.status, 200, reset.text);
+
+  const secondState = await api(baseUrl, "/api/state", { token: second.data.token });
+  assert.equal(secondState.status, 200);
+  assert.equal(secondState.data.state.balance, STARTING_GOLD);
+  assert.equal(secondState.data.state.roundNumber, 0);
+  assert.equal(secondState.data.epoch, 1);
+
+  const firstState = await api(baseUrl, "/api/state", { token: first.data.token });
+  assert.equal(firstState.data.state.balance, STARTING_GOLD);
+  assert.equal(firstState.data.epoch, 2);
+});
+
+test("keeps only the five highest personal payouts and preserves profile across resets", async () => {
+  const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
+
+  const stakes = Array.from({ length: 15 }, (_, index) => index + 1);
+  for (const stake of stakes) {
+    const started = await api(baseUrl, "/api/round/start", {
+      method: "POST", token,
+      headers: { "idempotency-key": idempotencyKey() }, body: { stake }
     });
+    assert.equal(started.status, 200, started.text);
+
+    const settled = await cashOut(baseUrl, token, started.data.round.id, 100);
+    assert.equal(settled.status, 200, settled.text);
+    assert.equal(settled.data.result, "cashed_out");
+    assert.equal(settled.data.payout, stake);
+  }
+
+  const finalState = await api(baseUrl, "/api/state", { token });
+  assert.equal(finalState.status, 200, finalState.text);
+  assert.equal(finalState.data.profile.stats.roundsPlayed, stakes.length);
+  assert.equal(finalState.data.profile.stats.totalStaked, stakes.reduce((sum, value) => sum + value, 0));
+  const entries = finalState.data.profile.leaderboard;
+  assert.deepEqual(entries.map((entry) => entry.payout), [15, 14, 13, 12, 11],
+    "Only the five highest payouts are kept, best first.");
+
+  const resetProfile = await api(baseUrl, "/api/game/reset", {
+    method: "POST", token,
+    headers: { "idempotency-key": idempotencyKey() }, body: {}
+  });
+  assert.equal(resetProfile.status, 200, resetProfile.text);
+  assert.equal(resetProfile.data.profile.stats.roundsPlayed, stakes.length,
+    "Lifetime session statistics must survive a new game epoch.");
+  assert.deepEqual(resetProfile.data.profile.leaderboard, entries,
+    "Personal bests should persist across game resets.");
+});
+
+test("cash-out result never exceeds the multiplier sent by the visible release", async () => {
+  const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
+
+  const started = await api(baseUrl, "/api/round/start", {
+    method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 1 }
+  });
+  assert.equal(started.status, 200, started.text);
+  await pause(100);
+  const fairness = await api(baseUrl, "/api/fairness?limit=20", { token });
+  const recordedRound = fairness.data.rounds.find((round) => round.id === started.data.round.id);
+  assert.equal(recordedRound.crash_point, null, "A round that is still running must not show its crash point.");
+  const cashout = await cashOut(baseUrl, token, started.data.round.id, 100);
+  assert.equal(cashout.status, 200, cashout.text);
+  assert.equal(cashout.data.result, "cashed_out");
+  assert.equal(cashout.data.multiplier, 1,
+    "A delayed successful request is capped at the multiplier displayed when release occurred.");
+});
+
+test("early release queued before round commit settles atomically at the x1 boundary", async () => {
+  const cases = [
+    { clientSeed: LONG_ROUNDS_SEED, result: "cashed_out", payout: 1 },
+    { clientSeed: INSTANT_BUST_SEED, result: "busted", payout: 0 }
+  ];
+  for (const { clientSeed, result, payout } of cases) {
+    const token = await newPlayer(baseUrl, clientSeed);
 
     const startKey = idempotencyKey();
-    const firstStart = await api(baseUrl, "/api/round/start", {
-      method: "POST", token: auth, headers: { "idempotency-key": startKey }, body: { stake: 1 }
+    const releaseKey = idempotencyKey();
+    const queued = await api(baseUrl, "/api/round/release-intent", {
+      method: "POST", token, headers: { "idempotency-key": releaseKey }, body: { startKey }
     });
-    assert.equal(firstStart.status, 200, firstStart.text);
-    assert.equal(firstStart.data.state.balance, STARTING_GOLD - 1);
-    assert.ok(Number.isFinite(firstStart.data.serverTime), "Start response must include a server-clock sample.");
-    assert.equal(Object.hasOwn(firstStart.data, "crashPoint"), false, "Crash point must not be sent while round is running.");
-    const firstRoundId = firstStart.data.round.id;
+    assert.equal(queued.status, 200, queued.text);
+    assert.equal(queued.data.releaseMode, "queued");
 
-    await t.test("start response hides the crash point and duplicate starts replay without creating rounds", async () => {
-      assert.equal(Object.hasOwn(firstStart.data, "crashPoint"), false);
-      const roundsBeforeReplay = await api(baseUrl, "/api/fairness?limit=10", { token: auth });
-      assert.equal(roundsBeforeReplay.status, 200);
-
-      const replayStart = await api(baseUrl, "/api/round/start", {
-        method: "POST", token: auth, headers: { "idempotency-key": startKey }, body: { stake: 1 }
-      });
-      assert.equal(replayStart.status, 200, replayStart.text);
-      assert.equal(replayStart.data.round.id, firstRoundId);
-      assert.ok(Number.isFinite(replayStart.data.serverTime), "Idempotent replay should get a fresh server-clock sample.");
-      const roundsAfterReplay = await api(baseUrl, "/api/fairness?limit=10", { token: auth });
-      assert.equal(roundsAfterReplay.status, 200);
-      assert.equal(roundsAfterReplay.data.totalRounds, roundsBeforeReplay.data.totalRounds,
-        "Replaying a start request must not create another round.");
-
-      const wrongActionReuse = await api(baseUrl, "/api/round/cashout", {
-        method: "POST", token: auth, headers: { "idempotency-key": startKey }, body: { roundId: firstRoundId }
-      });
-      assert.equal(wrongActionReuse.status, 409);
-      assert.equal(wrongActionReuse.data.error, "idempotency_key_reused");
+    const started = await api(baseUrl, "/api/round/start", {
+      method: "POST", token, headers: { "idempotency-key": startKey }, body: { stake: 1 }
     });
+    assert.equal(started.status, 200, started.text);
+    assert.equal(started.data.result, result);
+    assert.equal(started.data.roundId, started.data.round.id);
+    assert.equal(started.data.state.roundNumber, 1);
+    assert.equal(started.data.state.activeRound, null);
+    assert.equal(started.data.payout, payout);
+    assert.equal(started.data.state.balance, STARTING_GOLD - 1 + payout);
 
-    const cashKey = idempotencyKey();
-    const firstCashout = await api(baseUrl, "/api/round/cashout", {
-      method: "POST", token: auth, headers: { "idempotency-key": cashKey }, body: { roundId: firstRoundId }
+    const replay = await api(baseUrl, "/api/round/start", {
+      method: "POST", token, headers: { "idempotency-key": startKey }, body: { stake: 1 }
     });
-    assert.equal(firstCashout.status, 200, firstCashout.text);
-    assert.equal(firstCashout.data.result, "cashed_out");
-    assert.equal(firstCashout.data.payout, 1);
-
-    await t.test("settles a round once and handles duplicate cash-out safely", async () => {
-      assert.equal(firstCashout.data.state.balance, STARTING_GOLD);
-
-      const replayCashout = await api(baseUrl, "/api/round/cashout", {
-        method: "POST", token: auth, headers: { "idempotency-key": cashKey }, body: { roundId: firstRoundId }
-      });
-      assert.equal(replayCashout.status, 200, replayCashout.text);
-      assert.equal(replayCashout.data.result, "cashed_out");
-      assert.equal(replayCashout.data.payout, 1);
-
-      const currentState = await api(baseUrl, "/api/state", { token: auth });
-      assert.equal(currentState.data.state.balance, STARTING_GOLD);
-      assert.equal(currentState.data.state.roundNumber, 1);
-      assert.equal(currentState.data.state.activeRound, null);
-      assert.equal(currentState.data.profile.stats.roundsPlayed, 1);
-      assert.equal(currentState.data.profile.stats.totalStaked, 1);
-      assert.equal(currentState.data.profile.stats.totalPayout, 1);
-      assert.ok(Array.isArray(currentState.data.profile.leaderboard));
-      assert.ok(currentState.data.profile.leaderboard.length <= 5);
-    });
-
-    await t.test("rejects overlapping round starts", async () => {
-      try {
-        const before = await api(baseUrl, "/api/state", { token: auth });
-        const fairnessBefore = await api(baseUrl, "/api/fairness?limit=100", { token: auth });
-        const [a, b] = await Promise.all([
-          api(baseUrl, "/api/round/start", { method: "POST", token: auth, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 2 } }),
-          api(baseUrl, "/api/round/start", { method: "POST", token: auth, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 3 } })
-        ]);
-        const accepted = [a, b].filter((result) => result.status === 200);
-        const conflicts = [a, b].filter((result) => result.status === 409);
-        assert.equal(accepted.length, 1, `${a.text}; ${b.text}`);
-        assert.equal(conflicts.length, 1, `${a.text}; ${b.text}`);
-
-        const winner = accepted[0].data;
-        const winnerStake = winner.round.stake;
-        assert.equal(winner.state.balance, before.data.state.balance - winnerStake,
-          "The start response must reflect exactly the accepted stake.");
-        const fairnessAfter = await api(baseUrl, "/api/fairness?limit=100", { token: auth });
-        assert.equal(fairnessAfter.data.totalRounds, fairnessBefore.data.totalRounds + 1,
-          "Only the accepted start may create a round record.");
-
-        const settle = await cashOut(baseUrl, auth, winner.round.id, 100);
-        assert.equal(settle.status, 200, settle.text);
-        assert.equal(settle.data.result, "cashed_out");
-        assert.equal(settle.data.payout, winnerStake);
-        const settledState = await api(baseUrl, "/api/state", { token: auth });
-        assert.equal(settledState.data.state.activeRound, null);
-        assert.equal(settledState.data.profile.stats.roundsPlayed,
-          before.data.profile.stats.roundsPlayed + 1,
-          "The settled round should update session statistics exactly once.");
-        assert.equal(settledState.data.profile.stats.totalStaked,
-          before.data.profile.stats.totalStaked + winnerStake,
-          "Session statistics should include every accepted stake exactly once.");
-        assert.ok(settledState.data.profile.leaderboard.length <= 5);
-        for (let i = 1; i < settledState.data.profile.leaderboard.length; i += 1) {
-          const previous = settledState.data.profile.leaderboard[i - 1];
-          const current = settledState.data.profile.leaderboard[i];
-          assert.ok(previous.payout > current.payout ||
-            (previous.payout === current.payout && previous.multiplier >= current.multiplier),
-            "Personal-best payouts must stay ordered by payout then multiplier.");
-        }
-      } finally {
-        // If an assertion fails, settle any surviving round so the following tests fail only
-        // for their own causes instead of cascading into a reset/round_in_progress error.
-        try {
-          const after = await api(baseUrl, "/api/state", { token: auth });
-          const activeRound = after.data?.state?.activeRound;
-          if (activeRound?.id) {
-            await cashOut(baseUrl, auth, activeRound.id, 100);
-          }
-        } catch { /* Preserve the original assertion as the primary failure. */ }
-      }
-    });
-    const reset = await api(baseUrl, "/api/game/reset", {
-      method: "POST", token: auth, headers: { "idempotency-key": idempotencyKey() }, body: {}
-    });
-    assert.equal(reset.status, 200, reset.text);
-
-    await t.test("revealed seed matches its original commitment and recomputes stored crash points", async () => {
-      assert.equal(reset.data.revealed.epoch, 1);
-      assert.equal(reset.data.epoch, 2);
-      assert.equal(reset.data.state.balance, STARTING_GOLD);
-      assert.equal(reset.data.state.roundNumber, 0);
-      const revealedSeed = reset.data.revealed.serverSeed;
-      assert.equal(revealedSeed, SERVER_SEED);
-      const calculatedCommitment = createHash("sha256").update(revealedSeed, "utf8").digest("hex");
-      assert.equal(calculatedCommitment, reset.data.revealed.commitment);
-
-      const fairness = await api(baseUrl, "/api/fairness?limit=100", { token: auth });
-      assert.equal(fairness.status, 200);
-      assert.equal(fairness.data.currentEpoch, 2);
-      const oldSeedRecord = fairness.data.seeds.find((seed) => seed.epoch === 1);
-      assert.ok(oldSeedRecord);
-      assert.equal(oldSeedRecord.revealed_seed, revealedSeed);
-      assert.equal(oldSeedRecord.commitment, calculatedCommitment);
-
-      const oldRounds = fairness.data.rounds.filter((round) => round.epoch === 1);
-      assert.equal(oldRounds.length, 2, "Expected both test rounds to remain in the round history.");
-
-      const pageOne = await api(baseUrl, "/api/fairness?limit=1&roundOffset=0&seedOffset=0", { token: auth });
-      const pageTwo = await api(baseUrl, "/api/fairness?limit=1&roundOffset=1&seedOffset=1", { token: auth });
-      assert.equal(pageOne.status, 200);
-      assert.equal(pageTwo.status, 200);
-      assert.equal(pageOne.data.totalRounds, fairness.data.totalRounds);
-      assert.equal(pageOne.data.rounds.length, 1);
-      assert.equal(pageTwo.data.rounds.length, 1);
-      assert.notEqual(pageOne.data.rounds[0].id, pageTwo.data.rounds[0].id,
-        "roundOffset must return the next page rather than repeat page one");
-      assert.equal(pageTwo.data.seeds[0].epoch, 2,
-        "seedOffset must return the second seed epoch when requested");
-
-      const refreshedAfterReset = await api(baseUrl, "/api/state", { token: auth });
-      assert.equal(refreshedAfterReset.data.state.balance, STARTING_GOLD);
-      assert.equal(refreshedAfterReset.data.state.roundNumber, 0);
-      assert.equal(refreshedAfterReset.data.state.clientSeed, null);
-      assert.equal(refreshedAfterReset.data.state.activeRound, null);
-      assert.equal(refreshedAfterReset.data.state.activeLoans.length, 0);
-      assert.equal(refreshedAfterReset.data.epoch, 2);
-      assert.equal(refreshedAfterReset.data.profile.stats.roundsPlayed, oldRounds.length,
-        "Session statistics must persist across game resets and include every settled round from the revealed epoch");
-      for (const round of oldRounds) {
-        assert.equal(round.status, "cashed_out", `Round ${round.id} should have cashed out.`);
-        assert.equal(typeof round.crash_point, "number");
-        assert.equal(calculateRoundOutcome(revealedSeed, round, 1).crashPoint, round.crash_point,
-          `Crash point mismatch for round ${round.id}, nonce ${round.nonce}`);
-      }
-    });
-
-    await t.test("a second session is independent", async () => {
-      const second = await api(baseUrl, "/api/session", { method: "POST", body: {} });
-      assert.equal(second.status, 201, second.text);
-      assert.notEqual(second.data.sessionId, session.sessionId);
-      const secondState = await api(baseUrl, "/api/state", { token: second.data.token });
-      assert.equal(secondState.status, 200);
-      assert.equal(secondState.data.state.balance, STARTING_GOLD);
-      assert.equal(secondState.data.state.roundNumber, 0);
-      assert.equal(secondState.data.epoch, 1);
-
-      const firstState = await api(baseUrl, "/api/state", { token: auth });
-      assert.equal(firstState.data.state.balance, STARTING_GOLD);
-      assert.equal(firstState.data.epoch, 2);
-    });
-
-    await t.test("keeps only the five highest personal payouts and preserves profile across resets", async () => {
-      const freshToken = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
-
-      const stakes = Array.from({ length: 15 }, (_, index) => index + 1);
-      for (const stake of stakes) {
-        const started = await api(baseUrl, "/api/round/start", {
-          method: "POST", token: freshToken,
-          headers: { "idempotency-key": idempotencyKey() }, body: { stake }
-        });
-        assert.equal(started.status, 200, started.text);
-
-        const settled = await cashOut(baseUrl, freshToken, started.data.round.id, 100);
-        assert.equal(settled.status, 200, settled.text);
-        assert.equal(settled.data.result, "cashed_out");
-        assert.equal(settled.data.payout, stake);
-      }
-
-      const finalState = await api(baseUrl, "/api/state", { token: freshToken });
-      assert.equal(finalState.status, 200, finalState.text);
-      assert.equal(finalState.data.profile.stats.roundsPlayed, stakes.length);
-      assert.equal(finalState.data.profile.stats.totalStaked, stakes.reduce((sum, value) => sum + value, 0));
-      const entries = finalState.data.profile.leaderboard;
-      assert.deepEqual(entries.map((entry) => entry.payout), [15, 14, 13, 12, 11],
-        "Only the five highest payouts are kept, best first.");
-
-      const resetProfile = await api(baseUrl, "/api/game/reset", {
-        method: "POST", token: freshToken,
-        headers: { "idempotency-key": idempotencyKey() }, body: {}
-      });
-      assert.equal(resetProfile.status, 200, resetProfile.text);
-      assert.equal(resetProfile.data.profile.stats.roundsPlayed, stakes.length,
-        "Lifetime session statistics must survive a new game epoch.");
-      assert.deepEqual(resetProfile.data.profile.leaderboard, entries,
-        "Personal bests should persist across game resets.");
-    });
-
-    await t.test("cash-out result never exceeds the multiplier sent by the visible release", async () => {
-      const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
-
-      const started = await api(baseUrl, "/api/round/start", {
-        method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 1 }
-      });
-      assert.equal(started.status, 200, started.text);
-      await pause(100);
-      const fairness = await api(baseUrl, "/api/fairness?limit=20", { token });
-      const recordedRound = fairness.data.rounds.find((round) => round.id === started.data.round.id);
-      assert.equal(recordedRound.crash_point, null, "A round that is still running must not show its crash point.");
-      const cashout = await cashOut(baseUrl, token, started.data.round.id, 100);
-      assert.equal(cashout.status, 200, cashout.text);
-      assert.equal(cashout.data.result, "cashed_out");
-      assert.equal(cashout.data.multiplier, 1,
-        "A delayed successful request is capped at the multiplier displayed when release occurred.");
-    });
-
-    await t.test("early release queued before round commit settles atomically at the x1 boundary", async () => {
-      const cases = [
-        { clientSeed: LONG_ROUNDS_SEED, result: "cashed_out", payout: 1 },
-        { clientSeed: INSTANT_BUST_SEED, result: "busted", payout: 0 }
-      ];
-      for (const { clientSeed, result, payout } of cases) {
-        const token = await newPlayer(baseUrl, clientSeed);
-
-        const startKey = idempotencyKey();
-        const releaseKey = idempotencyKey();
-        const queued = await api(baseUrl, "/api/round/release-intent", {
-          method: "POST", token, headers: { "idempotency-key": releaseKey }, body: { startKey }
-        });
-        assert.equal(queued.status, 200, queued.text);
-        assert.equal(queued.data.releaseMode, "queued");
-
-        const started = await api(baseUrl, "/api/round/start", {
-          method: "POST", token, headers: { "idempotency-key": startKey }, body: { stake: 1 }
-        });
-        assert.equal(started.status, 200, started.text);
-        assert.equal(started.data.result, result);
-        assert.equal(started.data.roundId, started.data.round.id);
-        assert.equal(started.data.state.roundNumber, 1);
-        assert.equal(started.data.state.activeRound, null);
-        assert.equal(started.data.payout, payout);
-        assert.equal(started.data.state.balance, STARTING_GOLD - 1 + payout);
-
-        const replay = await api(baseUrl, "/api/round/start", {
-          method: "POST", token, headers: { "idempotency-key": startKey }, body: { stake: 1 }
-        });
-        assert.equal(replay.status, 200, replay.text);
-        assert.equal(replay.data.result, result);
-        assert.equal(replay.data.state.balance, started.data.state.balance,
-          "Replaying start must not settle or credit the round a second time.");
-        const state = await api(baseUrl, "/api/state", { token });
-        assert.equal(state.data.profile.stats.roundsPlayed, 1);
-      }
-    });
-
-    await t.test("release intent after round commit settles once and is idempotent", async () => {
-      const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
-
-      const startKey = idempotencyKey();
-      const started = await api(baseUrl, "/api/round/start", {
-        method: "POST", token, headers: { "idempotency-key": startKey }, body: { stake: 1 }
-      });
-      assert.equal(started.status, 200, started.text);
-      const releaseKey = idempotencyKey();
-      const release = await api(baseUrl, "/api/round/release-intent", {
-        method: "POST", token, headers: { "idempotency-key": releaseKey }, body: { startKey }
-      });
-      assert.equal(release.status, 200, release.text);
-      assert.equal(release.data.releaseMode, "settled");
-      assert.equal(release.data.result, "cashed_out");
-      assert.equal(release.data.payout, 1);
-      assert.equal(release.data.state.activeRound, null);
-      assert.equal(release.data.state.roundNumber, 1);
-
-      const replay = await api(baseUrl, "/api/round/release-intent", {
-        method: "POST", token, headers: { "idempotency-key": releaseKey }, body: { startKey }
-      });
-      assert.equal(replay.status, 200, replay.text);
-      assert.equal(replay.data.result, release.data.result);
-      assert.equal(replay.data.state.balance, release.data.state.balance);
-      const state = await api(baseUrl, "/api/state", { token });
-      assert.equal(state.data.profile.stats.roundsPlayed, 1,
-        "Duplicate early release requests must not double-settle the round.");
-    });
-
-    await t.test("public state returns only the ten history rows shown by the UI while fairness records remain available", async () => {
-      const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
-
-      for (let index = 0; index < 12; index += 1) {
-        const started = await api(baseUrl, "/api/round/start", {
-          method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 1 }
-        });
-        assert.equal(started.status, 200, started.text);
-        const result = await cashOut(baseUrl, token, started.data.round.id, 100);
-        assert.equal(result.status, 200, result.text);
-        assert.equal(result.data.result, "cashed_out");
-      }
-      const state = await api(baseUrl, "/api/state", { token });
-      assert.equal(state.status, 200, state.text);
-      assert.equal(state.data.state.roundNumber, 12);
-      assert.equal(state.data.state.history.length, 10);
-      const fairness = await api(baseUrl, "/api/fairness?limit=20", { token });
-      assert.equal(fairness.status, 200, fairness.text);
-      assert.equal(fairness.data.totalRounds, 12, "Public-history trimming must not delete fairness records.");
-    });
-
-    await t.test("Durable Object alarm pushes settlement without any status poll", { timeout: 25_000 }, async () => {
-      const isolatedToken = await newPlayer(baseUrl, BUST_SEED);
-      const { socket, waitFor } = openEventSocket(baseUrl, isolatedToken);
-      try {
-        await Promise.race([
-          new Promise((resolve, reject) => {
-            const timer = setTimeout(() => reject(new Error("WebSocket handshake timed out.")), 5000);
-            socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
-            socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("WebSocket connection failed.")); }, { once: true });
-          })
-        ]);
-        await waitFor((message) => message.type === "ready");
-        assert.equal(socket.protocol, "gamba-events-v1", "The bearer token subprotocol must never be echoed back.");
-        const started = await api(baseUrl, "/api/round/start", {
-          method: "POST", token: isolatedToken, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 1 }
-        });
-        assert.equal(started.status, 200, started.text);
-        const roundId = started.data.round.id;
-        assert.ok(roundId);
-
-        // Do not request /api/round/status while waiting. The Durable Object alarm itself must
-        // settle the round and publish the same authoritative result over the live socket.
-        const pushed = await waitFor((message) => message.type === "round-settled" && message.roundId === roundId, 15_000);
-        assert.equal(pushed.result, "busted");
-        assert.equal(pushed.crashPoint, 1.58);
-        assert.equal(pushed.payout, 0);
-        assert.equal(pushed.state.activeRound, null);
-        assert.equal(pushed.state.roundNumber, 1);
-
-        const recovered = await api(baseUrl, "/api/state", { token: isolatedToken });
-        assert.equal(recovered.status, 200, recovered.text);
-        assert.equal(recovered.data.state.activeRound, null, "the server alarm should settle the active round");
-        assert.equal(recovered.data.state.roundNumber, 1);
-        assert.equal(recovered.data.profile.stats.roundsPlayed, 1);
-      } finally {
-        try { socket.close(); } catch { /* already closed */ }
-      }
-    });
-
-    await t.test("authenticated WebSocket receives settlement events without waiting for status polling", async () => {
-      const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
-      const { socket, waitFor } = openEventSocket(baseUrl, token);
-      try {
-        await Promise.race([
-          new Promise((resolve, reject) => {
-            socket.addEventListener("open", resolve, { once: true });
-            socket.addEventListener("error", () => reject(new Error("WebSocket connection failed.")), { once: true });
-          }),
-          pause(5000).then(() => { throw new Error("WebSocket handshake timed out."); })
-        ]);
-        await waitFor((message) => message.type === "ready");
-        const startKey = idempotencyKey();
-        const started = await api(baseUrl, "/api/round/start", {
-          method: "POST", token, headers: { "idempotency-key": startKey }, body: { stake: 1 }
-        });
-        assert.equal(started.status, 200, started.text);
-        assert.ok(started.data.round.id);
-        const roundId = started.data.round.id;
-        const cashout = await cashOut(baseUrl, token, roundId);
-        assert.equal(cashout.status, 200, cashout.text);
-        const pushed = await waitFor((message) => message.type === "round-settled" && message.roundId === roundId);
-        assert.equal(pushed.result, "cashed_out");
-        assert.equal(pushed.payout, 1);
-        assert.equal(pushed.state.activeRound, null);
-        assert.equal(pushed.state.roundNumber, 1);
-      } finally {
-        try { socket.close(); } catch { /* already closed */ }
-      }
-    });
-
-    await t.test("does not allow ending a healthy game with a positive balance", async () => {
-      const before = await api(baseUrl, "/api/state", { token: auth });
-      assert.equal(before.data.state.balance, STARTING_GOLD);
-      const ended = await api(baseUrl, "/api/game/end", {
-        method: "POST", token: auth, headers: { "idempotency-key": idempotencyKey() }, body: {}
-      });
-      assert.equal(ended.status, 409, ended.text);
-      assert.equal(ended.data.error, "game_not_awaiting_decision");
-      const after = await api(baseUrl, "/api/state", { token: auth });
-      assert.equal(after.data.state.balance, STARTING_GOLD);
-      assert.equal(after.data.state.gameOver, false);
-    });
-  } finally {
-    await stopProcess(child);
-    await rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+    assert.equal(replay.status, 200, replay.text);
+    assert.equal(replay.data.result, result);
+    assert.equal(replay.data.state.balance, started.data.state.balance,
+      "Replaying start must not settle or credit the round a second time.");
+    const state = await api(baseUrl, "/api/state", { token });
+    assert.equal(state.data.profile.stats.roundsPlayed, 1);
   }
+});
+
+test("release intent after round commit settles once and is idempotent", async () => {
+  const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
+
+  const startKey = idempotencyKey();
+  const started = await api(baseUrl, "/api/round/start", {
+    method: "POST", token, headers: { "idempotency-key": startKey }, body: { stake: 1 }
+  });
+  assert.equal(started.status, 200, started.text);
+  const releaseKey = idempotencyKey();
+  const release = await api(baseUrl, "/api/round/release-intent", {
+    method: "POST", token, headers: { "idempotency-key": releaseKey }, body: { startKey }
+  });
+  assert.equal(release.status, 200, release.text);
+  assert.equal(release.data.releaseMode, "settled");
+  assert.equal(release.data.result, "cashed_out");
+  assert.equal(release.data.payout, 1);
+  assert.equal(release.data.state.activeRound, null);
+  assert.equal(release.data.state.roundNumber, 1);
+
+  const replay = await api(baseUrl, "/api/round/release-intent", {
+    method: "POST", token, headers: { "idempotency-key": releaseKey }, body: { startKey }
+  });
+  assert.equal(replay.status, 200, replay.text);
+  assert.equal(replay.data.result, release.data.result);
+  assert.equal(replay.data.state.balance, release.data.state.balance);
+  const state = await api(baseUrl, "/api/state", { token });
+  assert.equal(state.data.profile.stats.roundsPlayed, 1,
+    "Duplicate early release requests must not double-settle the round.");
+});
+
+test("public state returns only the ten history rows shown by the UI while fairness records remain available", async () => {
+  const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
+
+  for (let index = 0; index < 12; index += 1) {
+    const started = await api(baseUrl, "/api/round/start", {
+      method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 1 }
+    });
+    assert.equal(started.status, 200, started.text);
+    const result = await cashOut(baseUrl, token, started.data.round.id, 100);
+    assert.equal(result.status, 200, result.text);
+    assert.equal(result.data.result, "cashed_out");
+  }
+  const state = await api(baseUrl, "/api/state", { token });
+  assert.equal(state.status, 200, state.text);
+  assert.equal(state.data.state.roundNumber, 12);
+  assert.equal(state.data.state.history.length, 10);
+  const fairness = await api(baseUrl, "/api/fairness?limit=20", { token });
+  assert.equal(fairness.status, 200, fairness.text);
+  assert.equal(fairness.data.totalRounds, 12, "Public-history trimming must not delete fairness records.");
+});
+
+test("Durable Object alarm pushes settlement without any status poll", { timeout: 25_000 }, async () => {
+  const token = await newPlayer(baseUrl, BUST_SEED);
+  const { socket, waitFor } = openEventSocket(baseUrl, token);
+  try {
+    await Promise.race([
+      new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("WebSocket handshake timed out.")), 5000);
+        socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
+        socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("WebSocket connection failed.")); }, { once: true });
+      })
+    ]);
+    await waitFor((message) => message.type === "ready");
+    assert.equal(socket.protocol, "gamba-events-v1", "The bearer token subprotocol must never be echoed back.");
+    const started = await api(baseUrl, "/api/round/start", {
+      method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 1 }
+    });
+    assert.equal(started.status, 200, started.text);
+    const roundId = started.data.round.id;
+    assert.ok(roundId);
+
+    // Do not request /api/round/status while waiting. The Durable Object alarm itself must
+    // settle the round and publish the same authoritative result over the live socket.
+    const pushed = await waitFor((message) => message.type === "round-settled" && message.roundId === roundId, 15_000);
+    assert.equal(pushed.result, "busted");
+    assert.equal(pushed.crashPoint, 1.58);
+    assert.equal(pushed.payout, 0);
+    assert.equal(pushed.state.activeRound, null);
+    assert.equal(pushed.state.roundNumber, 1);
+
+    const recovered = await api(baseUrl, "/api/state", { token });
+    assert.equal(recovered.status, 200, recovered.text);
+    assert.equal(recovered.data.state.activeRound, null, "the server alarm should settle the active round");
+    assert.equal(recovered.data.state.roundNumber, 1);
+    assert.equal(recovered.data.profile.stats.roundsPlayed, 1);
+  } finally {
+    try { socket.close(); } catch { /* already closed */ }
+  }
+});
+
+test("authenticated WebSocket receives settlement events without waiting for status polling", async () => {
+  const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
+  const { socket, waitFor } = openEventSocket(baseUrl, token);
+  try {
+    await Promise.race([
+      new Promise((resolve, reject) => {
+        socket.addEventListener("open", resolve, { once: true });
+        socket.addEventListener("error", () => reject(new Error("WebSocket connection failed.")), { once: true });
+      }),
+      pause(5000).then(() => { throw new Error("WebSocket handshake timed out."); })
+    ]);
+    await waitFor((message) => message.type === "ready");
+    const startKey = idempotencyKey();
+    const started = await api(baseUrl, "/api/round/start", {
+      method: "POST", token, headers: { "idempotency-key": startKey }, body: { stake: 1 }
+    });
+    assert.equal(started.status, 200, started.text);
+    assert.ok(started.data.round.id);
+    const roundId = started.data.round.id;
+    const cashout = await cashOut(baseUrl, token, roundId);
+    assert.equal(cashout.status, 200, cashout.text);
+    const pushed = await waitFor((message) => message.type === "round-settled" && message.roundId === roundId);
+    assert.equal(pushed.result, "cashed_out");
+    assert.equal(pushed.payout, 1);
+    assert.equal(pushed.state.activeRound, null);
+    assert.equal(pushed.state.roundNumber, 1);
+  } finally {
+    try { socket.close(); } catch { /* already closed */ }
+  }
+});
+
+test("does not allow ending a healthy game with a positive balance", async () => {
+  const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
+  const stateBefore = await api(baseUrl, "/api/state", { token });
+  assert.equal(stateBefore.data.state.balance, STARTING_GOLD);
+  const ended = await api(baseUrl, "/api/game/end", {
+    method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: {}
+  });
+  assert.equal(ended.status, 409, ended.text);
+  assert.equal(ended.data.error, "game_not_awaiting_decision");
+  const stateAfter = await api(baseUrl, "/api/state", { token });
+  assert.equal(stateAfter.data.state.balance, STARTING_GOLD);
+  assert.equal(stateAfter.data.state.gameOver, false);
 });
