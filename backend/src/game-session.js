@@ -212,7 +212,8 @@ export class GameSession {
     if (this.readState()) return json({ error: "already_initialized" }, 409);
     const edge = Number(body.edgePercent);
     if (!Number.isInteger(edge) || edge < 0 || edge > 10) throw new ApiError(500, "invalid_house_edge_config", "House edge configuration must be 0–10%.");
-    const seed = bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
+    // Local tests set FIXED_SERVER_SEED so they can work out crash points in advance.
+    const seed = this.env.FIXED_SERVER_SEED || bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
     const encrypted = await encryptSeed(seed, this.env.SEED_ENCRYPTION_KEY);
     const commitment = await sha256Hex(seed);
     const state = {

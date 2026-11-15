@@ -16,6 +16,11 @@ const ALLOWED_ORIGIN = "http://localhost:5500";
 const SECOND_ALLOWED_ORIGIN = "https://candidate.github.io";
 const COMPATIBILITY_DATE = "2026-10-12";
 const STARTING_GOLD = 888;
+const SERVER_SEED = "0123456789abcdef".repeat(4);
+// Client seeds and the crash points they give with SERVER_SEED.
+const LONG_ROUNDS_SEED = "long-rounds-3562"; // nonces 1 to 15 all crash at x2.03 or higher
+const BUST_SEED = "bust-seed-6"; // nonce 1 crashes at x1.58, about 0.7 s after the start
+const INSTANT_BUST_SEED = "instant-bust-50"; // nonce 1 crashes at x1.00
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -93,25 +98,22 @@ function idempotencyKey() {
   return randomUUID().replace(/-/g, "");
 }
 
-async function newPlayer(baseUrl) {
+async function newPlayer(baseUrl, clientSeed) {
   const created = await api(baseUrl, "/api/session", { method: "POST", body: {} });
   assert.equal(created.status, 201, created.text);
   const token = created.data.token;
   const seed = await api(baseUrl, "/api/client-seed", {
-    method: "POST", token, body: { clientSeed: randomBytes(16).toString("hex") }
+    method: "POST", token, body: { clientSeed }
   });
   assert.equal(seed.status, 200, seed.text);
   return token;
 }
 
-async function cashOutOrStatus(baseUrl, token, roundId, requestedMultiplierCents) {
-  const cashout = await api(baseUrl, "/api/round/cashout", {
+function cashOut(baseUrl, token, roundId, requestedMultiplierCents) {
+  return api(baseUrl, "/api/round/cashout", {
     method: "POST", token, headers: { "idempotency-key": idempotencyKey() },
     body: { roundId, requestedMultiplierCents }
   });
-  if (cashout.status !== 409 || cashout.data?.error !== "round_not_running") return cashout;
-  // A very low crash may have been settled by its alarm before this request arrived.
-  return api(baseUrl, `/api/round/status?id=${encodeURIComponent(roundId)}`, { token });
 }
 
 function openEventSocket(baseUrl, token) {
@@ -163,7 +165,7 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
 
   const testSessionSecret = randomBytes(32).toString("hex");
   const testSeedKey = randomBytes(32).toString("base64");
-  const testConfig = `name = "gamba-test-worker"\nmain = "src/index.js"\ncompatibility_date = "${COMPATIBILITY_DATE}"\n\n[[durable_objects.bindings]]\nname = "GAME_SESSIONS"\nclass_name = "GameSession"\n\n[exports.GameSession]\ntype = "durable-object"\nstorage = "sqlite"\n\n[vars]\nALLOWED_ORIGINS = "${ALLOWED_ORIGIN},${SECOND_ALLOWED_ORIGIN}"\nHOUSE_EDGE_PERCENT = "1"\n`;
+  const testConfig = `name = "gamba-test-worker"\nmain = "src/index.js"\ncompatibility_date = "${COMPATIBILITY_DATE}"\n\n[[durable_objects.bindings]]\nname = "GAME_SESSIONS"\nclass_name = "GameSession"\n\n[exports.GameSession]\ntype = "durable-object"\nstorage = "sqlite"\n\n[vars]\nALLOWED_ORIGINS = "${ALLOWED_ORIGIN},${SECOND_ALLOWED_ORIGIN}"\nHOUSE_EDGE_PERCENT = "1"\nFIXED_SERVER_SEED = "${SERVER_SEED}"\n`;
   await writeFile(path.join(tempRoot, "wrangler.toml"), testConfig, "utf8");
   await writeFile(
     path.join(tempRoot, ".dev.vars"),
@@ -247,10 +249,9 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
       assert.equal(noSeedStart.data.error, "client_seed_required");
     });
 
-    const clientSeed = randomBytes(16).toString("hex");
-    const seedSet = await api(baseUrl, "/api/client-seed", { method: "POST", token: auth, body: { clientSeed } });
+    const seedSet = await api(baseUrl, "/api/client-seed", { method: "POST", token: auth, body: { clientSeed: LONG_ROUNDS_SEED } });
     assert.equal(seedSet.status, 200, seedSet.text);
-    assert.equal(seedSet.data.clientSeed, clientSeed);
+    assert.equal(seedSet.data.clientSeed, LONG_ROUNDS_SEED);
     assert.equal(seedSet.data.commitment, session.commitment);
 
     await t.test("rejects invalid client seeds and malformed/oversized requests", async () => {
@@ -344,103 +345,66 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
     });
 
     const cashKey = idempotencyKey();
-    let firstCashout = await api(baseUrl, "/api/round/cashout", {
+    const firstCashout = await api(baseUrl, "/api/round/cashout", {
       method: "POST", token: auth, headers: { "idempotency-key": cashKey }, body: { roundId: firstRoundId }
     });
-    const cashOutRequestWasAccepted = firstCashout.status === 200;
-    if (firstCashout.status === 409 && firstCashout.data?.error === "round_not_running") {
-      // A very low crash may have been settled by its alarm before this request arrived.
-      firstCashout = await api(baseUrl, `/api/round/status?id=${encodeURIComponent(firstRoundId)}`, { token: auth });
-    }
     assert.equal(firstCashout.status, 200, firstCashout.text);
-    assert.ok(["cashed_out", "busted"].includes(firstCashout.data.result));
+    assert.equal(firstCashout.data.result, "cashed_out");
+    assert.equal(firstCashout.data.payout, 1);
 
     await t.test("settles a round once and handles duplicate cash-out safely", async () => {
-      const initialCashBalance = firstCashout.data.state.balance;
-      assert.equal(initialCashBalance, STARTING_GOLD - 1 + firstCashout.data.payout);
+      assert.equal(firstCashout.data.state.balance, STARTING_GOLD);
 
       const replayCashout = await api(baseUrl, "/api/round/cashout", {
         method: "POST", token: auth, headers: { "idempotency-key": cashKey }, body: { roundId: firstRoundId }
       });
-      if (cashOutRequestWasAccepted) {
-        assert.equal(replayCashout.status, 200, replayCashout.text);
-        assert.equal(replayCashout.data.result, firstCashout.data.result);
-        assert.equal(replayCashout.data.payout, firstCashout.data.payout);
-      } else {
-        // The alarm already settled the round before the cash-out request reached the server,
-        // so that request was correctly rejected and has no idempotency cache entry.
-        assert.equal(replayCashout.status, 409, replayCashout.text);
-        assert.equal(replayCashout.data.error, "round_not_running");
-      }
+      assert.equal(replayCashout.status, 200, replayCashout.text);
+      assert.equal(replayCashout.data.result, "cashed_out");
+      assert.equal(replayCashout.data.payout, 1);
 
       const currentState = await api(baseUrl, "/api/state", { token: auth });
-      assert.equal(currentState.data.state.balance, initialCashBalance);
+      assert.equal(currentState.data.state.balance, STARTING_GOLD);
       assert.equal(currentState.data.state.roundNumber, 1);
       assert.equal(currentState.data.state.activeRound, null);
       assert.equal(currentState.data.profile.stats.roundsPlayed, 1);
       assert.equal(currentState.data.profile.stats.totalStaked, 1);
-      assert.equal(currentState.data.profile.stats.totalPayout, firstCashout.data.payout);
+      assert.equal(currentState.data.profile.stats.totalPayout, 1);
       assert.ok(Array.isArray(currentState.data.profile.leaderboard));
       assert.ok(currentState.data.profile.leaderboard.length <= 5);
     });
 
-    await t.test("rejects overlapping round starts and permits a start after an immediate crash", async () => {
+    await t.test("rejects overlapping round starts", async () => {
       try {
         const before = await api(baseUrl, "/api/state", { token: auth });
         const fairnessBefore = await api(baseUrl, "/api/fairness?limit=100", { token: auth });
-        const keyA = idempotencyKey();
-        const keyB = idempotencyKey();
         const [a, b] = await Promise.all([
-          api(baseUrl, "/api/round/start", { method: "POST", token: auth, headers: { "idempotency-key": keyA }, body: { stake: 2 } }),
-          api(baseUrl, "/api/round/start", { method: "POST", token: auth, headers: { "idempotency-key": keyB }, body: { stake: 3 } })
+          api(baseUrl, "/api/round/start", { method: "POST", token: auth, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 2 } }),
+          api(baseUrl, "/api/round/start", { method: "POST", token: auth, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 3 } })
         ]);
-        const successResponses = [a, b].filter((result) => result.status === 200);
+        const accepted = [a, b].filter((result) => result.status === 200);
         const conflicts = [a, b].filter((result) => result.status === 409);
-        let startedRounds;
+        assert.equal(accepted.length, 1, `${a.text}; ${b.text}`);
+        assert.equal(conflicts.length, 1, `${a.text}; ${b.text}`);
 
-        if (successResponses.length === 1 && conflicts.length === 1) {
-          // Normal case: both requests overlap while the first round is starting.
-          startedRounds = [successResponses[0].data];
-        } else if (successResponses.length === 2 && conflicts.length === 0) {
-          // A crash point of x1.00 can settle the first round before the second request
-          // reaches the session. In that case, two successful starts are valid only if
-          // the first round's settlement timestamp precedes the later round's start.
-          const ordered = successResponses.map((result) => result.data)
-            .sort((left, right) => left.round.nonce - right.round.nonce);
-          const earlier = ordered[0];
-          const later = ordered[1];
-          const earlierStatus = await api(baseUrl,
-            `/api/round/status?id=${encodeURIComponent(earlier.round.id)}`, { token: auth });
-          assert.equal(earlierStatus.status, 200, earlierStatus.text);
-          assert.equal(earlierStatus.data.result, "busted",
-            "Two starts may both succeed only if the earlier round crashed before the later start.");
-          assert.ok(Number.isFinite(earlierStatus.data.cashedOutAt),
-            "The earlier crash must have a recorded settlement timestamp.");
-          assert.ok(earlierStatus.data.cashedOutAt <= later.round.startedAt,
-            "The earlier round must be settled before the next round starts; active rounds must not overlap.");
-          startedRounds = ordered;
-        } else {
-          assert.fail(`Unexpected concurrent start responses ${a.status} and ${b.status}: ${a.text}; ${b.text}`);
-        }
-
-        const winner = startedRounds[startedRounds.length - 1];
-        const totalStakeStarted = startedRounds.reduce((total, round) => total + round.round.stake, 0);
-        assert.equal(winner.state.balance, before.data.state.balance - totalStakeStarted,
-          "The latest start response must reflect exactly the stakes accepted so far.");
+        const winner = accepted[0].data;
+        const winnerStake = winner.round.stake;
+        assert.equal(winner.state.balance, before.data.state.balance - winnerStake,
+          "The start response must reflect exactly the accepted stake.");
         const fairnessAfter = await api(baseUrl, "/api/fairness?limit=100", { token: auth });
-        assert.equal(fairnessAfter.data.totalRounds, fairnessBefore.data.totalRounds + startedRounds.length,
-          "Only accepted starts may create round records.");
+        assert.equal(fairnessAfter.data.totalRounds, fairnessBefore.data.totalRounds + 1,
+          "Only the accepted start may create a round record.");
 
-        const settle = await cashOutOrStatus(baseUrl, auth, winner.round.id);
+        const settle = await cashOut(baseUrl, auth, winner.round.id, 100);
         assert.equal(settle.status, 200, settle.text);
-        assert.ok(["cashed_out", "busted"].includes(settle.data.result));
+        assert.equal(settle.data.result, "cashed_out");
+        assert.equal(settle.data.payout, winnerStake);
         const settledState = await api(baseUrl, "/api/state", { token: auth });
         assert.equal(settledState.data.state.activeRound, null);
         assert.equal(settledState.data.profile.stats.roundsPlayed,
-          before.data.profile.stats.roundsPlayed + startedRounds.length,
-          "Every accepted and settled round should update session statistics exactly once.");
+          before.data.profile.stats.roundsPlayed + 1,
+          "The settled round should update session statistics exactly once.");
         assert.equal(settledState.data.profile.stats.totalStaked,
-          before.data.profile.stats.totalStaked + totalStakeStarted,
+          before.data.profile.stats.totalStaked + winnerStake,
           "Session statistics should include every accepted stake exactly once.");
         assert.ok(settledState.data.profile.leaderboard.length <= 5);
         for (let i = 1; i < settledState.data.profile.leaderboard.length; i += 1) {
@@ -457,13 +421,7 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
           const after = await api(baseUrl, "/api/state", { token: auth });
           const activeRound = after.data?.state?.activeRound;
           if (activeRound?.id) {
-            let cleanupResult = await api(baseUrl, "/api/round/cashout", {
-              method: "POST", token: auth, headers: { "idempotency-key": idempotencyKey() },
-              body: { roundId: activeRound.id, requestedMultiplierCents: 100 }
-            });
-            if (cleanupResult.status === 409 && cleanupResult.data?.error === "round_not_running") {
-              cleanupResult = await api(baseUrl, `/api/round/status?id=${encodeURIComponent(activeRound.id)}`, { token: auth });
-            }
+            await cashOut(baseUrl, auth, activeRound.id, 100);
           }
         } catch { /* Preserve the original assertion as the primary failure. */ }
       }
@@ -479,7 +437,7 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
       assert.equal(reset.data.state.balance, STARTING_GOLD);
       assert.equal(reset.data.state.roundNumber, 0);
       const revealedSeed = reset.data.revealed.serverSeed;
-      assert.match(revealedSeed, /^[0-9a-f]{64}$/);
+      assert.equal(revealedSeed, SERVER_SEED);
       const calculatedCommitment = createHash("sha256").update(revealedSeed, "utf8").digest("hex");
       assert.equal(calculatedCommitment, reset.data.revealed.commitment);
 
@@ -492,7 +450,7 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
       assert.equal(oldSeedRecord.commitment, calculatedCommitment);
 
       const oldRounds = fairness.data.rounds.filter((round) => round.epoch === 1);
-      assert.ok(oldRounds.length >= 2, "Expected both test rounds to remain in the round history.");
+      assert.equal(oldRounds.length, 2, "Expected both test rounds to remain in the round history.");
 
       const pageOne = await api(baseUrl, "/api/fairness?limit=1&roundOffset=0&seedOffset=0", { token: auth });
       const pageTwo = await api(baseUrl, "/api/fairness?limit=1&roundOffset=1&seedOffset=1", { token: auth });
@@ -516,7 +474,7 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
       assert.equal(refreshedAfterReset.data.profile.stats.roundsPlayed, oldRounds.length,
         "Session statistics must persist across game resets and include every settled round from the revealed epoch");
       for (const round of oldRounds) {
-        assert.ok(["cashed_out", "busted"].includes(round.status), `Round ${round.id} was not settled.`);
+        assert.equal(round.status, "cashed_out", `Round ${round.id} should have cashed out.`);
         assert.equal(typeof round.crash_point, "number");
         assert.equal(calculateRoundOutcome(revealedSeed, round, 1).crashPoint, round.crash_point,
           `Crash point mismatch for round ${round.id}, nonce ${round.nonce}`);
@@ -527,7 +485,6 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
       const second = await api(baseUrl, "/api/session", { method: "POST", body: {} });
       assert.equal(second.status, 201, second.text);
       assert.notEqual(second.data.sessionId, session.sessionId);
-      assert.notEqual(second.data.commitment, session.commitment);
       const secondState = await api(baseUrl, "/api/state", { token: second.data.token });
       assert.equal(secondState.status, 200);
       assert.equal(secondState.data.state.balance, STARTING_GOLD);
@@ -540,7 +497,7 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
     });
 
     await t.test("keeps only the five highest personal payouts and preserves profile across resets", async () => {
-      const freshToken = await newPlayer(baseUrl);
+      const freshToken = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
 
       const stakes = Array.from({ length: 15 }, (_, index) => index + 1);
       for (const stake of stakes) {
@@ -550,26 +507,19 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
         });
         assert.equal(started.status, 200, started.text);
 
-        const settled = await cashOutOrStatus(baseUrl, freshToken, started.data.round.id);
+        const settled = await cashOut(baseUrl, freshToken, started.data.round.id, 100);
         assert.equal(settled.status, 200, settled.text);
-        assert.ok(["cashed_out", "busted"].includes(settled.data.result || settled.data.status),
-          `Round must be settled before starting the next one: ${settled.text}`);
+        assert.equal(settled.data.result, "cashed_out");
+        assert.equal(settled.data.payout, stake);
       }
 
       const finalState = await api(baseUrl, "/api/state", { token: freshToken });
       assert.equal(finalState.status, 200, finalState.text);
       assert.equal(finalState.data.profile.stats.roundsPlayed, stakes.length);
       assert.equal(finalState.data.profile.stats.totalStaked, stakes.reduce((sum, value) => sum + value, 0));
-      assert.equal(finalState.data.profile.leaderboard.length, 5,
-        "A session with at least five positive cash-outs should retain exactly five personal bests.");
       const entries = finalState.data.profile.leaderboard;
-      for (let index = 1; index < entries.length; index += 1) {
-        const previous = entries[index - 1];
-        const current = entries[index];
-        assert.ok(previous.payout > current.payout ||
-          (previous.payout === current.payout && previous.multiplier >= current.multiplier),
-          "Personal bests must be ordered by payout then multiplier.");
-      }
+      assert.deepEqual(entries.map((entry) => entry.payout), [15, 14, 13, 12, 11],
+        "Only the five highest payouts are kept, best first.");
 
       const resetProfile = await api(baseUrl, "/api/game/reset", {
         method: "POST", token: freshToken,
@@ -583,69 +533,64 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
     });
 
     await t.test("cash-out result never exceeds the multiplier sent by the visible release", async () => {
-      const token = await newPlayer(baseUrl);
+      const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
 
-      let matchedCap = false;
-      for (let attempt = 0; attempt < 12 && !matchedCap; attempt += 1) {
+      const started = await api(baseUrl, "/api/round/start", {
+        method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 1 }
+      });
+      assert.equal(started.status, 200, started.text);
+      await pause(100);
+      const fairness = await api(baseUrl, "/api/fairness?limit=20", { token });
+      const recordedRound = fairness.data.rounds.find((round) => round.id === started.data.round.id);
+      assert.equal(recordedRound.crash_point, null, "A round that is still running must not show its crash point.");
+      const cashout = await cashOut(baseUrl, token, started.data.round.id, 100);
+      assert.equal(cashout.status, 200, cashout.text);
+      assert.equal(cashout.data.result, "cashed_out");
+      assert.equal(cashout.data.multiplier, 1,
+        "A delayed successful request is capped at the multiplier displayed when release occurred.");
+    });
+
+    await t.test("early release queued before round commit settles atomically at the x1 boundary", async () => {
+      const cases = [
+        { clientSeed: LONG_ROUNDS_SEED, result: "cashed_out", payout: 1 },
+        { clientSeed: INSTANT_BUST_SEED, result: "busted", payout: 0 }
+      ];
+      for (const { clientSeed, result, payout } of cases) {
+        const token = await newPlayer(baseUrl, clientSeed);
+
         const startKey = idempotencyKey();
+        const releaseKey = idempotencyKey();
+        const queued = await api(baseUrl, "/api/round/release-intent", {
+          method: "POST", token, headers: { "idempotency-key": releaseKey }, body: { startKey }
+        });
+        assert.equal(queued.status, 200, queued.text);
+        assert.equal(queued.data.releaseMode, "queued");
+
         const started = await api(baseUrl, "/api/round/start", {
           method: "POST", token, headers: { "idempotency-key": startKey }, body: { stake: 1 }
         });
         assert.equal(started.status, 200, started.text);
-        if (started.data.result) continue; // A fast x1.00 crash is legitimately settled at start.
-        await new Promise(resolve => setTimeout(resolve, 100));
-        const fairness = await api(baseUrl, "/api/fairness?limit=20", { token });
-        const recordedRound = fairness.data.rounds.find((round) => round.id === started.data.round.id);
-        const requestedMultiplierCents = 100;
-        const cashout = await cashOutOrStatus(baseUrl, token, started.data.round.id, requestedMultiplierCents);
-        assert.equal(cashout.status, 200, cashout.text);
-        if (cashout.data.result === "cashed_out") {
-          assert.equal(recordedRound.crash_point, null, "A round that is still running must not show its crash point.");
-          assert.equal(cashout.data.multiplier, 1,
-            "A delayed successful request is capped at the multiplier displayed when release occurred.");
-          matchedCap = true;
-        } else {
-          assert.equal(cashout.data.result, "busted", "Requests processed after crash must still lose.");
-        }
+        assert.equal(started.data.result, result);
+        assert.equal(started.data.roundId, started.data.round.id);
+        assert.equal(started.data.state.roundNumber, 1);
+        assert.equal(started.data.state.activeRound, null);
+        assert.equal(started.data.payout, payout);
+        assert.equal(started.data.state.balance, STARTING_GOLD - 1 + payout);
+
+        const replay = await api(baseUrl, "/api/round/start", {
+          method: "POST", token, headers: { "idempotency-key": startKey }, body: { stake: 1 }
+        });
+        assert.equal(replay.status, 200, replay.text);
+        assert.equal(replay.data.result, result);
+        assert.equal(replay.data.state.balance, started.data.state.balance,
+          "Replaying start must not settle or credit the round a second time.");
+        const state = await api(baseUrl, "/api/state", { token });
+        assert.equal(state.data.profile.stats.roundsPlayed, 1);
       }
-      assert.equal(matchedCap, true, "Expected at least one round to survive long enough to test the release cap.");
-    });
-
-    await t.test("early release queued before round commit settles atomically at the x1 boundary", async () => {
-      const token = await newPlayer(baseUrl);
-
-      const startKey = idempotencyKey();
-      const releaseKey = idempotencyKey();
-      const queued = await api(baseUrl, "/api/round/release-intent", {
-        method: "POST", token, headers: { "idempotency-key": releaseKey }, body: { startKey }
-      });
-      assert.equal(queued.status, 200, queued.text);
-      assert.equal(queued.data.releaseMode, "queued");
-
-      const started = await api(baseUrl, "/api/round/start", {
-        method: "POST", token, headers: { "idempotency-key": startKey }, body: { stake: 1 }
-      });
-      assert.equal(started.status, 200, started.text);
-      assert.ok(["cashed_out", "busted"].includes(started.data.result),
-        `An early release must be settled in the start response: ${JSON.stringify(started.data)}`);
-      assert.equal(started.data.roundId, started.data.round.id);
-      assert.equal(started.data.state.roundNumber, 1);
-      assert.equal(started.data.state.activeRound, null);
-      assert.equal(started.data.payout, started.data.result === "cashed_out" ? 1 : 0);
-
-      const replay = await api(baseUrl, "/api/round/start", {
-        method: "POST", token, headers: { "idempotency-key": startKey }, body: { stake: 1 }
-      });
-      assert.equal(replay.status, 200, replay.text);
-      assert.equal(replay.data.result, started.data.result);
-      assert.equal(replay.data.state.balance, started.data.state.balance,
-        "Replaying start must not settle or credit the round a second time.");
-      const state = await api(baseUrl, "/api/state", { token });
-      assert.equal(state.data.profile.stats.roundsPlayed, 1);
     });
 
     await t.test("release intent after round commit settles once and is idempotent", async () => {
-      const token = await newPlayer(baseUrl);
+      const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
 
       const startKey = idempotencyKey();
       const started = await api(baseUrl, "/api/round/start", {
@@ -658,7 +603,8 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
       });
       assert.equal(release.status, 200, release.text);
       assert.equal(release.data.releaseMode, "settled");
-      assert.ok(["cashed_out", "busted"].includes(release.data.result || release.data.status));
+      assert.equal(release.data.result, "cashed_out");
+      assert.equal(release.data.payout, 1);
       assert.equal(release.data.state.activeRound, null);
       assert.equal(release.data.state.roundNumber, 1);
 
@@ -674,30 +620,16 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
     });
 
     await t.test("public state returns only the ten history rows shown by the UI while fairness records remain available", async () => {
-      const token = await newPlayer(baseUrl);
+      const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
 
       for (let index = 0; index < 12; index += 1) {
         const started = await api(baseUrl, "/api/round/start", {
           method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { stake: 1 }
         });
         assert.equal(started.status, 200, started.text);
-        if (started.data.result) continue; // The early x1 boundary can legitimately bust.
-
-        const result = await api(baseUrl, "/api/round/cashout", {
-          method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { roundId: started.data.round.id }
-        });
-        if (result.status === 409 && result.data?.error === "round_not_running") {
-          // A low crash point may settle between the start response and this immediate cash-out.
-          // That's valid game behavior; verify that it really settled before continuing.
-          const settledState = await api(baseUrl, "/api/state", { token });
-          assert.equal(settledState.status, 200, settledState.text);
-          assert.equal(settledState.data.state.activeRound, null,
-            "A round_not_running response must correspond to a settled round.");
-          assert.equal(settledState.data.state.roundNumber, index + 1,
-            "The round must be recorded before the history test continues.");
-          continue;
-        }
+        const result = await cashOut(baseUrl, token, started.data.round.id, 100);
         assert.equal(result.status, 200, result.text);
+        assert.equal(result.data.result, "cashed_out");
       }
       const state = await api(baseUrl, "/api/state", { token });
       assert.equal(state.status, 200, state.text);
@@ -709,7 +641,7 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
     });
 
     await t.test("Durable Object alarm pushes settlement without any status poll", { timeout: 25_000 }, async () => {
-      const isolatedToken = await newPlayer(baseUrl);
+      const isolatedToken = await newPlayer(baseUrl, BUST_SEED);
       const { socket, waitFor } = openEventSocket(baseUrl, isolatedToken);
       try {
         await Promise.race([
@@ -731,7 +663,9 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
         // Do not request /api/round/status while waiting. The Durable Object alarm itself must
         // settle the round and publish the same authoritative result over the live socket.
         const pushed = await waitFor((message) => message.type === "round-settled" && message.roundId === roundId, 15_000);
-        assert.ok(["cashed_out", "busted"].includes(pushed.result));
+        assert.equal(pushed.result, "busted");
+        assert.equal(pushed.crashPoint, 1.58);
+        assert.equal(pushed.payout, 0);
         assert.equal(pushed.state.activeRound, null);
         assert.equal(pushed.state.roundNumber, 1);
 
@@ -746,7 +680,7 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
     });
 
     await t.test("authenticated WebSocket receives settlement events without waiting for status polling", async () => {
-      const token = await newPlayer(baseUrl);
+      const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
       const { socket, waitFor } = openEventSocket(baseUrl, token);
       try {
         await Promise.race([
@@ -764,12 +698,11 @@ test("gamba backend local integration and regression suite", { timeout: 120_000 
         assert.equal(started.status, 200, started.text);
         assert.ok(started.data.round.id);
         const roundId = started.data.round.id;
-        const cashout = await api(baseUrl, "/api/round/cashout", {
-          method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { roundId }
-        });
-        assert.ok(cashout.status === 200 || (cashout.status === 409 && cashout.data.error === "round_not_running"), cashout.text);
+        const cashout = await cashOut(baseUrl, token, roundId);
+        assert.equal(cashout.status, 200, cashout.text);
         const pushed = await waitFor((message) => message.type === "round-settled" && message.roundId === roundId);
-        assert.ok(["cashed_out", "busted"].includes(pushed.result));
+        assert.equal(pushed.result, "cashed_out");
+        assert.equal(pushed.payout, 1);
         assert.equal(pushed.state.activeRound, null);
         assert.equal(pushed.state.roundNumber, 1);
       } finally {
