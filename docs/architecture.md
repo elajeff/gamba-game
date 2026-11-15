@@ -32,7 +32,7 @@
 1. **Only the server settles a round.** The client-supplied cash-out multiplier is a ceiling. The server's own time and committed crash point determine whether it succeeds and its maximum payout.
 2. **Wallet changes and the corresponding round/response records stay in SQLite transactions.**
 3. **Start, release, cash-out, loan, reset and end-game requests use idempotency keys.** A retry after a lost response doesn't deduct a second stake or issue a second loan.
-4. **Start reservations and early-release intents are part of the round lifecycle.** They cover requests arriving close together.
+4. **A new start is rejected while a round is running, and early-release intents are part of the round lifecycle.** A start checks for a running round and checks again inside its transaction. A release that arrives before its start has committed is recorded and applied by that start.
 5. **Alarms and status requests may race with cash-out.** Each checks the round is still running and settles it with no `await` in between. An early release settles the round in the transaction that creates it.
 6. **Fairness records do not reveal an active round's crash point.** Seed records and round history are retained because deleting them would weaken historical verification.
 7. **The client clock is only a display estimate.** The server remains authoritative even if the browser clock, animation or network is delayed.

@@ -23,9 +23,6 @@ function corsHeaders(origin) {
 
 export default {
   async fetch(request, env) {
-    // Timestamp requests at the edge before authentication/DO dispatch so queued concurrent
-    // starts can be distinguished from genuinely new starts after a prior response completed.
-    const edgeReceivedAt = Date.now();
     const requestId = crypto.randomUUID();
     const origin = request.headers.get("origin");
     if (origin && !configuredOrigins(env).has(origin)) return json({ error: "origin_not_allowed" }, 403, { vary: "Origin" });
@@ -78,11 +75,8 @@ export default {
       let forwarded = isEventSocket ? request : new Request(`https://session.internal${url.pathname}${url.search}`, request);
       if (!isEventSocket) {
         const headers = new Headers(forwarded.headers);
-        // Internal tracing/timing headers are always overwritten at the trusted edge.
+        // The internal tracing header is always overwritten at the trusted edge.
         headers.set("x-gamba-request-id", requestId);
-        if (request.method === "POST" && url.pathname === "/api/round/start") {
-          headers.set("x-gamba-internal-received-at", String(edgeReceivedAt));
-        }
         forwarded = new Request(forwarded, { headers });
       }
       const response = await stub.fetch(forwarded);
