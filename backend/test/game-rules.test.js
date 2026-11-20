@@ -5,13 +5,12 @@ import { calculatePayout, readRequestedMultiplierCents, resolveCashoutMultiplier
 test("cash-out uses the lower of the server multiplier and the client display cap", () => {
   assert.equal(resolveCashoutMultiplierCents(2.349, 200), 200);
   assert.equal(resolveCashoutMultiplierCents(2.349, 900), 234);
-  assert.equal(resolveCashoutMultiplierCents(10), 1000);
+  assert.equal(resolveCashoutMultiplierCents(10, 1000), 1000);
 });
 
-test("cash-out input accepts omitted legacy values and rejects invalid cents", () => {
-  assert.equal(readRequestedMultiplierCents({}), undefined);
+test("cash-out input accepts whole cents and rejects invalid or missing values", () => {
   assert.equal(readRequestedMultiplierCents({ requestedMultiplierCents: 125 }), 125);
-  for (const value of [0, 99, 1001, 100.5, "200", null, Number.MAX_SAFE_INTEGER]) {
+  for (const value of [undefined, 0, 99, 1001, 100.5, "200", null, Number.MAX_SAFE_INTEGER]) {
     assert.throws(() => readRequestedMultiplierCents({ requestedMultiplierCents: value }), (error) => {
       assert.equal(error.status, 400);
       assert.equal(error.code, "invalid_cashout_multiplier");

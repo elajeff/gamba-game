@@ -294,7 +294,7 @@ test("rejects invalid client seeds and malformed/oversized requests", async () =
 
 test("rejects invalid stakes and loans without mutating the wallet", async () => {
   const token = await newPlayer(baseUrl, LONG_ROUNDS_SEED);
-  for (const stake of [0, -1, 1.5, 888.5, Math.floor(Number.MAX_SAFE_INTEGER / 10) + 1]) {
+  for (const stake of [0, -1, 1.5, 888.5, Number.MAX_SAFE_INTEGER + 1]) {
     const response = await api(baseUrl, "/api/round/start", {
       method: "POST", token, headers: { "idempotency-key": idempotencyKey() }, body: { stake }
     });
@@ -349,14 +349,14 @@ test("duplicate start and cash-out requests replay without creating or settling 
     "Replaying a start request must not create another round.");
 
   const wrongActionReuse = await api(baseUrl, "/api/round/cashout", {
-    method: "POST", token, headers: { "idempotency-key": startKey }, body: { roundId: firstRoundId }
+    method: "POST", token, headers: { "idempotency-key": startKey }, body: { roundId: firstRoundId, requestedMultiplierCents: 100 }
   });
   assert.equal(wrongActionReuse.status, 409);
   assert.equal(wrongActionReuse.data.error, "idempotency_key_reused");
 
   const cashKey = idempotencyKey();
   const firstCashout = await api(baseUrl, "/api/round/cashout", {
-    method: "POST", token, headers: { "idempotency-key": cashKey }, body: { roundId: firstRoundId }
+    method: "POST", token, headers: { "idempotency-key": cashKey }, body: { roundId: firstRoundId, requestedMultiplierCents: 100 }
   });
   assert.equal(firstCashout.status, 200, firstCashout.text);
   assert.equal(firstCashout.data.result, "cashed_out");
@@ -364,7 +364,7 @@ test("duplicate start and cash-out requests replay without creating or settling 
   assert.equal(firstCashout.data.state.balance, STARTING_GOLD);
 
   const replayCashout = await api(baseUrl, "/api/round/cashout", {
-    method: "POST", token, headers: { "idempotency-key": cashKey }, body: { roundId: firstRoundId }
+    method: "POST", token, headers: { "idempotency-key": cashKey }, body: { roundId: firstRoundId, requestedMultiplierCents: 100 }
   });
   assert.equal(replayCashout.status, 200, replayCashout.text);
   assert.equal(replayCashout.data.result, "cashed_out");
@@ -576,7 +576,7 @@ test("early release queued before round commit settles atomically at the x1 boun
     const startKey = idempotencyKey();
     const releaseKey = idempotencyKey();
     const queued = await api(baseUrl, "/api/round/release-intent", {
-      method: "POST", token, headers: { "idempotency-key": releaseKey }, body: { startKey }
+      method: "POST", token, headers: { "idempotency-key": releaseKey }, body: { startKey, requestedMultiplierCents: 100 }
     });
     assert.equal(queued.status, 200, queued.text);
     assert.equal(queued.data.releaseMode, "queued");
@@ -614,7 +614,7 @@ test("release intent after round commit settles once and is idempotent", async (
   assert.equal(started.status, 200, started.text);
   const releaseKey = idempotencyKey();
   const release = await api(baseUrl, "/api/round/release-intent", {
-    method: "POST", token, headers: { "idempotency-key": releaseKey }, body: { startKey }
+    method: "POST", token, headers: { "idempotency-key": releaseKey }, body: { startKey, requestedMultiplierCents: 100 }
   });
   assert.equal(release.status, 200, release.text);
   assert.equal(release.data.releaseMode, "settled");
@@ -624,7 +624,7 @@ test("release intent after round commit settles once and is idempotent", async (
   assert.equal(release.data.state.roundNumber, 1);
 
   const replay = await api(baseUrl, "/api/round/release-intent", {
-    method: "POST", token, headers: { "idempotency-key": releaseKey }, body: { startKey }
+    method: "POST", token, headers: { "idempotency-key": releaseKey }, body: { startKey, requestedMultiplierCents: 100 }
   });
   assert.equal(replay.status, 200, replay.text);
   assert.equal(replay.data.result, release.data.result);
@@ -713,7 +713,7 @@ test("authenticated WebSocket receives settlement events without waiting for sta
     assert.equal(started.status, 200, started.text);
     assert.ok(started.data.round.id);
     const roundId = started.data.round.id;
-    const cashout = await cashOut(baseUrl, token, roundId);
+    const cashout = await cashOut(baseUrl, token, roundId, 100);
     assert.equal(cashout.status, 200, cashout.text);
     const pushed = await waitFor((message) => message.type === "round-settled" && message.roundId === roundId);
     assert.equal(pushed.result, "cashed_out");

@@ -372,12 +372,7 @@ export class GameSession {
     if (!state.clientSeed) throw new ApiError(409, "client_seed_required", "Set a client seed before starting a round.");
     if (this.getActiveRound()) throw new ApiError(409, "round_already_running", "Cash out or wait for the current round to finish.");
     const stake = body?.stake;
-    // No arbitrary gameplay cap: only retain a safe-integer ceiling so stake × x10 payouts stay precise.
-    const safeStakeCeiling = Math.max(0, Math.min(
-      Math.floor(Number.MAX_SAFE_INTEGER / MAX_MULTIPLIER),
-      Math.floor((Number.MAX_SAFE_INTEGER - state.balance) / (MAX_MULTIPLIER - 1))
-    ));
-    if (!Number.isSafeInteger(stake) || stake < 1 || stake > safeStakeCeiling) throw new ApiError(400, "invalid_stake", `Stake must be a whole number from 1 to ${safeStakeCeiling} to preserve exact integer arithmetic.`);
+    if (!Number.isSafeInteger(stake) || stake < 1) throw new ApiError(400, "invalid_stake", "Stake must be a whole number of at least 1.");
     if (stake > state.balance) throw new ApiError(409, "insufficient_balance", "Stake exceeds the current balance.");
 
     const epoch = state.currentEpoch;

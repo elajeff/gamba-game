@@ -1,28 +1,19 @@
-// Keep operational logs useful without logging request bodies, tokens or seed values.
-function redactSensitiveText(value) {
-  return value
-    .replace(/authorization([\s:=]+)(?:bearer[\s]+)?[^\s,;}]+/gi, "authorization=[redacted]")
-    .replace(/\bbearer[\s:=]+[^\s,;}]+/gi, "Bearer [redacted]")
-    .replace(/(session[_ -]?secret|seed[_ -]?encryption[_ -]?key|server[_ -]?seed|token)([\s:=]+)[^\s,;}]+/gi, "$1$2[redacted]")
-    .slice(0, 1200);
-}
-
-function safeErrorMessage(error) {
+function errorMessage(error) {
   const message = typeof error?.message === "string" ? error.message : "Unexpected error";
-  return redactSensitiveText(message).slice(0, 240);
+  return message.slice(0, 240);
 }
 
-function safeErrorStack(error) {
+function errorStack(error) {
   if (typeof error?.stack !== "string") return undefined;
-  return redactSensitiveText(error.stack.split("\n").slice(0, 10).join("\n"));
+  return error.stack.split("\n").slice(0, 10).join("\n");
 }
 
 function errorFields(error) {
   const fields = {
     errorName: typeof error?.name === "string" ? error.name.slice(0, 80) : "Error",
-    errorMessage: safeErrorMessage(error)
+    errorMessage: errorMessage(error)
   };
-  const stack = safeErrorStack(error);
+  const stack = errorStack(error);
   if (stack) fields.errorStack = stack;
   return fields;
 }

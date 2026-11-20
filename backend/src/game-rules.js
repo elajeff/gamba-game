@@ -19,15 +19,13 @@ export function emptyLoanFlags() {
 }
 
 // The client-provided multiplier is only a ceiling; the server decides the actual payout.
-export function resolveCashoutMultiplierCents(serverLiveMultiplier, requestedMultiplierCents = undefined) {
+export function resolveCashoutMultiplierCents(serverLiveMultiplier, requestedMultiplierCents) {
   const serverCents = Math.max(100, Math.min(MAX_MULTIPLIER * 100, Math.floor(serverLiveMultiplier * 100)));
-  if (requestedMultiplierCents === undefined) return serverCents;
   return Math.min(serverCents, requestedMultiplierCents);
 }
 
 export function readRequestedMultiplierCents(body) {
   const requestedCents = body?.requestedMultiplierCents;
-  if (requestedCents === undefined) return undefined; // Older clients may omit this value.
   if (!Number.isSafeInteger(requestedCents) || requestedCents < 100 || requestedCents > MAX_MULTIPLIER * 100) {
     throw new ApiError(400, "invalid_cashout_multiplier", "Requested cash-out multiplier must be whole cents from 100 to 1000.");
   }

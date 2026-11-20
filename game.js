@@ -164,20 +164,14 @@ function formatSignedGold(amount) {
   return `${value >= 0 ? "+" : "−"}${formatGold(Math.abs(value))}`;
 }
 
-function randomHex() {
-  const bytes = new Uint8Array(16);
-  window.crypto.getRandomValues(bytes);
-  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
 function newIdempotencyKey() {
-  if (window.crypto?.randomUUID) return window.crypto.randomUUID().replace(/-/g, "");
-  return randomHex();
+  return window.crypto.randomUUID().replace(/-/g, "");
 }
 
 function newClientSeed() {
-  if (!window.crypto?.getRandomValues) throw new Error("This browser does not provide secure random generation.");
-  return randomHex();
+  const bytes = new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function getBet() {
