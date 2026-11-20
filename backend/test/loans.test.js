@@ -11,6 +11,7 @@ function state(overrides = {}) {
     activeLoans: [],
     history: [],
     loansTaken: { "444": false, "888": false, "1500": false },
+    loansRepaid: { "444": false, "888": false, "1500": false },
     ...overrides
   };
 }

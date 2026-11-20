@@ -194,14 +194,6 @@ function hasUsedAllLoans(flags = game.loansTaken) {
   return Object.keys(LOANS).every((principal) => Boolean(flags?.[principal]));
 }
 
-function getRepaidFlags(state) {
-  const flags = { ...(state?.loansRepaid || {}) };
-  for (const item of state?.history || []) {
-    for (const repayment of item.repayments || []) flags[repayment.principal] = true;
-  }
-  return flags;
-}
-
 function renderFairness() {
   elements.fairnessCommitment.textContent = game.commitment || "Waiting for server commitment…";
   elements.fairnessClientSeed.textContent = game.clientSeed || "Client seed not set";
@@ -276,8 +268,8 @@ function applyState(state, profile = null, { updateModals = true } = {}) {
   game.gameOver = Boolean(state.gameOver);
   game.waitingForLoan = Boolean(state.waitingForLoan);
   game.activeLoans = Array.isArray(state.activeLoans) ? state.activeLoans : [];
-  game.loansTaken = { ...(state.loansTaken || {}) };
-  game.loansRepaid = getRepaidFlags(state);
+  game.loansTaken = state.loansTaken;
+  game.loansRepaid = state.loansRepaid;
   game.clientSeed = state.clientSeed || null;
   if (profile) applyProfile(profile);
   renderHistory(Array.isArray(state.history) ? state.history : []);
